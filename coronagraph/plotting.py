@@ -8,6 +8,20 @@ from .simulator import CoronagraphSimulator
 from .sweeps import sweep_local_region_phase_peaks
 
 
+def _theta_back_and_forth(n: int, max_abs: float = np.pi) -> np.ndarray:
+    if n <= 1:
+        return np.array([0.0], dtype=float)
+    raw = np.arange(n, dtype=float) * (2.0 * np.pi / float(n))
+    wrapped = ((raw + np.pi) % (2.0 * np.pi)) - np.pi
+    order = sorted(
+        range(n),
+        key=lambda i: (abs(float(wrapped[i])), 0 if float(wrapped[i]) <= 0.0 else 1),
+    )
+    arr = wrapped[np.asarray(order, dtype=int)]
+    arr[np.abs(arr) < 1e-14] = 0.0
+    return arr
+
+
 def plot_results(result: dict, save_path: str = "charge2_coronagraph_simulation.png") -> None:
     n_fft = result["n_fft"]
     samp = result["focal_sampling"]
@@ -762,12 +776,11 @@ def _plot_coc_planet_phase_outputs_impl(
             if mode == "global":
                 return [("global", np.ones(phase_series.size, dtype=bool))]
             if int(args.fov_count) == 1:
-                n_cycles = max(1, int(np.ceil(coc_phase_cycles)))
-                n_positions = max(1, int(np.ceil(n_cycles / 2.0)))
+                n_positions = max(1, int(args.fov_centers_count))
                 intervals: list[tuple[str, np.ndarray]] = []
                 for pos_idx in range(n_positions):
-                    lo = float(2 * pos_idx) * 2.0 * np.pi
-                    hi = float(2 * pos_idx + 2) * 2.0 * np.pi
+                    lo = float(pos_idx) * 2.0 * np.pi
+                    hi = float(pos_idx + 1) * 2.0 * np.pi
                     mask = (phase_series >= lo) & (
                         (phase_series <= hi) if pos_idx == n_positions - 1 else (phase_series < hi)
                     )
@@ -788,19 +801,10 @@ def _plot_coc_planet_phase_outputs_impl(
                     pos_idx = 0
                 planet_center_local = centers[planet_region_idx]
                 orbit_r = float(np.hypot(planet_center_local[0], planet_center_local[1]))
-                step_lamD_local = (
-                    float(args.single_region_step_diameter_fraction)
-                    * 2.0
-                    * float(args.local_region_radius)
-                )
-                dtheta_local = step_lamD_local / max(orbit_r, 1e-12)
                 base_theta_local = float(np.arctan2(planet_center_local[1], planet_center_local[0]))
-                if pos_idx == 0:
-                    mult_signed = 0.0
-                else:
-                    mag = float((pos_idx + 1) // 2)
-                    mult_signed = -mag if (pos_idx % 2 == 1) else +mag
-                th = base_theta_local + mult_signed * dtheta_local
+                theta_rel = _theta_back_and_forth(max(1, int(args.fov_centers_count)), max_abs=np.pi)
+                pos_idx = min(pos_idx, theta_rel.size - 1)
+                th = base_theta_local + float(theta_rel[pos_idx])
                 return float(orbit_r * np.cos(th)), float(orbit_r * np.sin(th))
             try:
                 fov_num = int(str(label).split()[-1])
@@ -972,24 +976,12 @@ def _plot_coc_planet_phase_outputs_impl(
     if single_fov_mode:
         planet_center = centers[planet_region_idx]
         orbit_r = float(np.hypot(planet_center[0], planet_center[1]))
-        # Draw all single-FOV centers used across cycles: +s, -s, +2s, -2s, ...
-        step_lamD = (
-            float(args.single_region_step_diameter_fraction)
-            * 2.0
-            * float(args.local_region_radius)
-        )
-        dtheta = step_lamD / max(orbit_r, 1e-12)
-        n_cycles = max(1, int(np.ceil(coc_phase_cycles)))
-        n_positions = max(1, int(np.ceil(n_cycles / 2.0)))
+        n_positions = max(1, int(args.fov_centers_count))
         base_theta = float(np.arctan2(planet_center[1], planet_center[0]))
+        theta_rel = _theta_back_and_forth(n_positions, max_abs=np.pi)
         cycle_centers: list[tuple[float, float]] = []
-        for cyc in range(n_positions):
-            if cyc == 0:
-                mult_signed = 0.0
-            else:
-                mag = float((cyc + 1) // 2)
-                mult_signed = -mag if (cyc % 2 == 1) else +mag
-            th = base_theta + mult_signed * dtheta
+        for th_rel in theta_rel:
+            th = base_theta + float(th_rel)
             cx = float(orbit_r * np.cos(th))
             cy = float(orbit_r * np.sin(th))
             cycle_centers.append((cx, cy))
@@ -1033,23 +1025,12 @@ def _plot_coc_planet_phase_outputs_impl(
         # Build one trace per cycle-position for single-FOV mode.
         planet_center = centers[planet_region_idx]
         orbit_r = float(np.hypot(planet_center[0], planet_center[1]))
-        step_lamD = (
-            float(args.single_region_step_diameter_fraction)
-            * 2.0
-            * float(args.local_region_radius)
-        )
-        dtheta = step_lamD / max(orbit_r, 1e-12)
-        n_cycles = max(1, int(np.ceil(coc_phase_cycles)))
-        n_positions = max(1, int(np.ceil(n_cycles / 2.0)))
+        n_positions = max(1, int(args.fov_centers_count))
         base_theta = float(np.arctan2(planet_center[1], planet_center[0]))
+        theta_rel = _theta_back_and_forth(n_positions, max_abs=np.pi)
         cycle_centers: list[tuple[float, float]] = []
-        for cyc in range(n_positions):
-            if cyc == 0:
-                mult_signed = 0.0
-            else:
-                mag = float((cyc + 1) // 2)
-                mult_signed = -mag if (cyc % 2 == 1) else +mag
-            th = base_theta + mult_signed * dtheta
+        for th_rel in theta_rel:
+            th = base_theta + float(th_rel)
             cx = float(orbit_r * np.cos(th))
             cy = float(orbit_r * np.sin(th))
             cycle_centers.append((cx, cy))
@@ -1175,22 +1156,11 @@ def _plot_coc_planet_phase_outputs_impl(
     if single_fov_mode:
         planet_center = centers[planet_region_idx]
         orbit_r = float(np.hypot(planet_center[0], planet_center[1]))
-        step_lamD = (
-            float(args.single_region_step_diameter_fraction)
-            * 2.0
-            * float(args.local_region_radius)
-        )
-        dtheta = step_lamD / max(orbit_r, 1e-12)
-        n_cycles = max(1, int(np.ceil(coc_phase_cycles)))
-        n_positions = max(1, int(np.ceil(n_cycles / 2.0)))
+        n_positions = max(1, int(args.fov_centers_count))
         base_theta = float(np.arctan2(planet_center[1], planet_center[0]))
-        for cyc in range(n_positions):
-            if cyc == 0:
-                mult_signed = 0.0
-            else:
-                mag = float((cyc + 1) // 2)
-                mult_signed = -mag if (cyc % 2 == 1) else +mag
-            th = base_theta + mult_signed * dtheta
+        theta_rel = _theta_back_and_forth(n_positions, max_abs=np.pi)
+        for th_rel in theta_rel:
+            th = base_theta + float(th_rel)
             cx = float(orbit_r * np.cos(th))
             cy = float(orbit_r * np.sin(th))
             ax2_c.add_patch(
@@ -1289,31 +1259,17 @@ def plot_coc_fov_position_sweep(
             if getattr(args, "coc_phase_cycles", None) is not None
             else float(getattr(args, "local_phase_cycles", 1.0))
         )
-        n_phase_cycles = max(1, int(np.ceil(coc_phase_cycles)))
-        single_fov_step_lamD = (
-            float(getattr(args, "single_region_step_diameter_fraction", 0.25))
-            * 2.0
-            * local_region_radius
-        )
-        if orbit_radius_lamD > 0.0:
-            dtheta = single_fov_step_lamD / orbit_radius_lamD
-        else:
-            dtheta = 0.0
-        n_positions = max(1, int(np.ceil(n_phase_cycles / 2.0)))
+        n_positions = max(1, int(getattr(args, "fov_centers_count", 1)))
+        theta_rel = _theta_back_and_forth(n_positions, max_abs=np.pi)
         for pos_idx in range(n_positions):
-            lo = float(2 * pos_idx) * 2.0 * np.pi
-            hi = float(2 * pos_idx + 2) * 2.0 * np.pi
+            lo = float(pos_idx) * 2.0 * np.pi
+            hi = float(pos_idx + 1) * 2.0 * np.pi
             pm = (phase_series >= lo) & ((phase_series <= hi) if pos_idx == n_positions - 1 else (phase_series < hi))
             idx = np.where(pm)[0]
             if idx.size < 3:
                 continue
 
-            if pos_idx == 0:
-                step_mult_signed = 0.0
-            else:
-                step_mag = float((pos_idx + 1) // 2)
-                step_mult_signed = -step_mag if (pos_idx % 2 == 1) else +step_mag
-            th = float(initial_angle_rad + step_mult_signed * dtheta)
+            th = float(initial_angle_rad + float(theta_rel[pos_idx]))
             ctr = (
                 float(orbit_radius_lamD * np.cos(th)),
                 float(orbit_radius_lamD * np.sin(th)),

@@ -7,9 +7,23 @@ import time
 
 import numpy as np
 
-from .cdi import circles_of_circles_center_sets
 from .plotting import plot_coc_planet_phase_outputs
 from .simulator import CoronagraphSimulator
+
+
+def _theta_back_and_forth(n: int, max_abs: float = np.pi) -> np.ndarray:
+    if n <= 1:
+        return np.array([0.0], dtype=float)
+    # Unique ring angles, ordered as back-and-forth around zero.
+    raw = np.arange(n, dtype=float) * (2.0 * np.pi / float(n))
+    wrapped = ((raw + np.pi) % (2.0 * np.pi)) - np.pi
+    order = sorted(
+        range(n),
+        key=lambda i: (abs(float(wrapped[i])), 0 if float(wrapped[i]) <= 0.0 else 1),
+    )
+    arr = wrapped[np.asarray(order, dtype=int)]
+    arr[np.abs(arr) < 1e-14] = 0.0
+    return arr
 
 
 def _run_roi_size_sweep_snr_vs_theta(
@@ -28,22 +42,6 @@ def _run_roi_size_sweep_snr_vs_theta(
 ) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_pdf import PdfPages
-
-    def _theta_back_and_forth(n: int, max_abs: float = np.pi) -> np.ndarray:
-        if n <= 1:
-            return np.array([0.0], dtype=float)
-        half = max(1, n // 2)
-        step = float(max_abs) / float(half)
-        seq: list[float] = [0.0]
-        k = 1
-        while len(seq) < n:
-            seq.append(-k * step)
-            if len(seq) < n:
-                seq.append(+k * step)
-            k += 1
-        arr = np.asarray(seq[:n], dtype=float)
-        arr[np.abs(arr) < 1e-14] = 0.0
-        return arr
 
     roi_dir = sweep_output_dir
     os.makedirs(roi_dir, exist_ok=True)
@@ -354,23 +352,14 @@ def run_coc_planet_phase(
     initial_angle_rad = float(np.arctan2(fixed_center[1], fixed_center[0]))
     fov_count = int(args.fov_count)
     fov_centers_count = int(args.fov_centers_count)
-    if fov_centers_count == 1:
-        centers = [fixed_center]
-    else:
-        centers = circles_of_circles_center_sets(
-            ring_radius_lamD=ring_radius_lamD,
-            circle_radius_lamD=float(args.local_region_radius),
-            n_relocations=1,
-            n_circles=fov_centers_count,
-            initial_angle_rad=initial_angle_rad,
-        )[0]
-        centers = [
-            (
-                float(ring_radius_lamD * np.cos(np.arctan2(cy, cx))),
-                float(ring_radius_lamD * np.sin(np.arctan2(cy, cx))),
-            )
-            for cx, cy in centers
-        ]
+    theta_rel = _theta_back_and_forth(max(1, fov_centers_count), max_abs=np.pi)
+    centers = [
+        (
+            float(ring_radius_lamD * np.cos(initial_angle_rad + th_rel)),
+            float(ring_radius_lamD * np.sin(initial_angle_rad + th_rel)),
+        )
+        for th_rel in theta_rel
+    ]
 
     d2 = [(cx - fixed_center[0]) ** 2 + (cy - fixed_center[1]) ** 2 for cx, cy in centers]
     planet_region_idx = int(np.argmin(d2))
@@ -390,11 +379,19 @@ def run_coc_planet_phase(
 
     coc_phase_cycles = float(args.phase_cycles)
     n_fov_groups = int(np.ceil(float(fov_centers_count) / float(fov_count)))
+    phase_steps_per_fov = int(args.phase_step)
+    phase_steps_total = max(2, phase_steps_per_fov * max(n_fov_groups, 1))
     phase_offsets = np.linspace(
         0.0,
         2.0 * np.pi * coc_phase_cycles * float(n_fov_groups),
-        int(args.phase_step),
+        phase_steps_total,
         endpoint=True,
+    )
+    print(
+        "Phase sampling: "
+        f"{phase_steps_per_fov} steps/FOV-block, "
+        f"{n_fov_groups} blocks, "
+        f"{phase_steps_total} total samples."
     )
 
     sim_local = dict(local_kwargs)
@@ -440,17 +437,6 @@ def run_coc_planet_phase(
     ]
 
     centers_tuple = tuple((float(cx), float(cy)) for cx, cy in centers)
-    # Single-FOV cycle stepping is on the star-centered ring that passes through
-    # the planet location, so star-planet distance remains constant.
-    single_fov_step_lamD = (
-        float(args.single_region_step_diameter_fraction)
-        * 2.0
-        * float(args.local_region_radius)
-    )
-    if single_fov_orbit_radius > 0.0:
-        single_fov_dtheta = single_fov_step_lamD / single_fov_orbit_radius
-    else:
-        single_fov_dtheta = 0.0
     group_cycle_span = 2.0 * np.pi * max(float(coc_phase_cycles), 1e-12)
 
     integrated_intensity = np.zeros((len(centers), phase_offsets.size), dtype=float)
@@ -543,7 +529,7 @@ def run_coc_planet_phase(
         try:
             import imageio.v2 as imageio
 
-            imageio.mimsave(gif_name, list(rgb8), duration=0.12, loop=0)
+            imageio.mimsave(gif_name, list(rgb8), duration=0.50, loop=0)
             saved_gif = True
         except Exception:
             try:
@@ -555,7 +541,7 @@ def run_coc_planet_phase(
                         gif_name,
                         save_all=True,
                         append_images=frames[1:],
-                        duration=120,
+                        duration=500,
                         loop=0,
                     )
                     saved_gif = True
@@ -638,7 +624,3 @@ def run_coc_planet_phase(
             "Planet strongest FFT peak in band B [0.120, 0.180] cycles/rad: "
             f"f={plot_info['band_b_peak'][0]:.6f}, amp={plot_info['band_b_peak'][1]:.6e}"
         )
-    roi_min_tag = f"{roi_min:.3f}".replace(".", "p")
-    roi_max_tag = f"{roi_max:.3f}".replace(".", "p")
-    roi_step_tag = f"{roi_step:.3f}".replace(".", "p")
-    roi_sweep_tag = f"_rmin_{roi_min_tag}_rmax_{roi_max_tag}_rstep_{roi_step_tag}"

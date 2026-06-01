@@ -29,7 +29,6 @@ Local/ROI Controls
 - FOV Count: number of FOVs phase-shifted simultaneously per step.
 - Number of FOV Centers: total FOV centers explored sequentially.
 - Single Ring Radius: optional orbit/expansion radius.
-- Single Step: arc step in lambda/D.
 
 Phase Controls
 - Phase Step: number of phase steps for each ROI.
@@ -472,7 +471,6 @@ HTML = """<!doctype html>
     <div class="field"><label>FOV Count <span class="tip" title="How many FOVs are phase-shifted simultaneously">?</span></label><input id="fov_count" value="1" /></div>
     <div class="field"><label>Number of FOV Centers <span class="tip" title="Total FOV centers visited sequentially">?</span></label><input id="fov_centers_count" value="1" /></div>
     <div class="field"><label>Single Ring Radius <span class="unit">λ/D</span></label><input id="single_region_ring_radius" value="" /></div>
-    <div class="field"><label>Single Step <span class="unit">λ/D</span></label><input id="single_region_step_lamd" value="1.0" /></div>
     <div class="field"><label>Phase Step</label><input id="phase_step" value="61" /></div>
     <div class="field"><label>Phase Cycles / FOV</label><input id="phase_cycles" value="1.0" /></div>
     <div class="field"><label>Planet Offset X <span class="unit">λ/D</span></label><input id="planet_offset_x_local" value="0.0" /></div>
@@ -528,7 +526,7 @@ HTML = """<!doctype html>
 const fields = [
   "phase_mask_type","roddier_mask_radius","roddier_mask_phase","vortex_charge","spider_width",
   "spider_angles","pupil_ss","phase_sweep_mode","local_region_radius","region_shape","fov_count","fov_centers_count",
-  "single_region_ring_radius","single_region_step_lamd","phase_step",
+  "single_region_ring_radius","phase_step",
   "phase_cycles","planet_offset_x_local","planet_offset_y_local","secondary_ratio_local",
   "planet_flux_ratio_local","roi_size_sweep","roi_size_min","roi_size_max","roi_size_step",
   "disable_ghost","disable_interference",
@@ -718,7 +716,6 @@ class Runner:
             "roi_size_min": "--roi-size-min",
             "roi_size_max": "--roi-size-max",
             "roi_size_step": "--roi-size-step",
-            "single_region_step_lamd": "--single-region-step-lamd",
         }
         for key, flag in args_map.items():
             cmd.extend([flag, str(payload.get(key, "")).strip()])

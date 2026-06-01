@@ -356,18 +356,6 @@ def parse_args() -> argparse.Namespace:
         help="Ring radius [λ/D] used when auto-expanding FOV centers.",
     )
     parser.add_argument(
-        "--single-region-step-diameter-fraction",
-        type=float,
-        default=0.25,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--single-region-step-lamd",
-        type=float,
-        default=None,
-        help="Auto-expansion arc step [λ/D].",
-    )
-    parser.add_argument(
         "--phase-step",
         type=int,
         default=61,
@@ -482,10 +470,9 @@ def _build_output_tags(args: argparse.Namespace, sim_kwargs: dict) -> tuple[str,
     effective_cycles = float(args.phase_cycles)
     phase_cycles_tag = f"_cycles_{float_filename_token(effective_cycles, precision=3)}"
     phase_sweep_mode_tag = f"_mode_{str(args.phase_sweep_mode).strip().lower()}"
-    step_tag = float_filename_token(args.single_region_step_diameter_fraction, precision=3)
     single_region_tag = (
         f"_fovsim_{int(args.fov_count)}_fovcenters_{int(args.fov_centers_count)}"
-        f"_shape_{str(args.region_shape)}_step_{step_tag}"
+        f"_shape_{str(args.region_shape)}"
     )
     ghost_suffix = f"_ghost_{'on' if sim_kwargs['include_ghost'] else 'off'}"
     return mask_output_tag, phase_cycles_tag, phase_sweep_mode_tag, single_region_tag, ghost_suffix
@@ -516,13 +503,6 @@ def main() -> None:
         args.secondary_ratio_local = float(args.coc_secondary_ratio)
     if args.coc_planet_flux_ratio is not None:
         args.planet_flux_ratio_local = float(args.coc_planet_flux_ratio)
-    if args.single_region_step_lamd is not None:
-        step_lamd = float(args.single_region_step_lamd)
-        if step_lamd <= 0.0:
-            raise ValueError("--single-region-step-lamd must be > 0.")
-        if float(args.local_region_radius) <= 0.0:
-            raise ValueError("--local-region-radius must be > 0 when using --single-region-step-lamd.")
-        args.single_region_step_diameter_fraction = step_lamd / (2.0 * float(args.local_region_radius))
     if bool(args.gui):
         if __package__:
             from .gui import main as gui_main
@@ -612,7 +592,7 @@ def main() -> None:
             region_shape=str(args.region_shape),
             fov_count=int(args.fov_count),
             single_region_ring_radius_lamD=args.single_region_ring_radius,
-            single_region_step_diameter_fraction=float(args.single_region_step_diameter_fraction),
+            single_region_step_diameter_fraction=0.25,
             save_path=out,
         )
         print(f"Saved localized region phase sweep plot: {out}")
@@ -634,7 +614,7 @@ def main() -> None:
             region_shape=str(args.region_shape),
             fov_count=int(args.fov_count),
             single_region_ring_radius_lamD=args.single_region_ring_radius,
-            single_region_step_diameter_fraction=float(args.single_region_step_diameter_fraction),
+            single_region_step_diameter_fraction=0.25,
             save_path=out,
         )
         print(f"Saved all-region FFT plot: {out}")
