@@ -1,8 +1,35 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from .masks import PhaseMask, VortexPhaseMask
+
+
+PHASE_SCREEN_DIR = Path(__file__).resolve().parent.parent / "phase_screen"
+PHASE_SCREEN_PATHS = {
+    "0": PHASE_SCREEN_DIR / "TROIA_phase_screens_new_jitter0percentLamdaOverD.fits",
+    "5": PHASE_SCREEN_DIR / "TROIA_phase_screens_new_jitter5percentLamdaOverD.fits",
+    "10": PHASE_SCREEN_DIR / "TROIA_phase_screens_new_jitter10percentLamdaOverD.fits",
+    "20": PHASE_SCREEN_DIR / "TROIA_phase_screens_new_jitter20percentLamdaOverD.fits",
+}
+
+
+def resolve_phase_screen_path(jitter_choice: str | int | None) -> str | None:
+    """Map a jitter choice to a bundled phase-screen FITS path."""
+    if jitter_choice is None:
+        return None
+    token = str(jitter_choice).strip().lower()
+    if token in {"", "none", "off"}:
+        return None
+    path = PHASE_SCREEN_PATHS.get(token)
+    if path is None:
+        raise ValueError(
+            f"Unsupported phase-screen jitter choice: {jitter_choice!r}. "
+            "Expected one of: none, 0, 5, 10, 20."
+        )
+    return str(path)
 
 
 class CoronagraphSimulator:
@@ -56,8 +83,14 @@ class CoronagraphSimulator:
     focal_local_phase_centers_lamD : tuple[tuple[float, float], ...]
         Region centers (x, y) in lambda/D for local first-focal-plane phase application.
         Supports any number of regions.
+    focal_local_phase_shape : str
+        Local first-focal-plane region geometry: "circle" or "ring".
     focal_local_phase_radius_lamD : float
         Circular region radius in lambda/D for local first-focal-plane phase application.
+    focal_local_phase_inner_radius_lamD : float
+        Inner radius in lambda/D when ``focal_local_phase_shape="ring"``.
+    focal_local_phase_outer_radius_lamD : float
+        Outer radius in lambda/D when ``focal_local_phase_shape="ring"``.
     secondary_diameter_ratio : float
         Central obscuration diameter divided by primary diameter (0 to <1).
     spider_width_pixels : float
@@ -73,6 +106,8 @@ class CoronagraphSimulator:
     _LYOT_STOP_CACHE: dict[tuple, np.ndarray] = {}
     _PHASE_MASK_CACHE: dict[tuple, np.ndarray] = {}
     _LOCAL_PHASE_REGION_CACHE: dict[tuple, np.ndarray] = {}
+    _PHASE_SCREEN_CUBE_CACHE: dict[str, np.ndarray] = {}
+    _PHASE_SCREEN_MAP_CACHE: dict[tuple, np.ndarray] = {}
 
     def __init__(
         self,
@@ -97,11 +132,16 @@ class CoronagraphSimulator:
         e_final_phase_offset: float = 0.0,
         focal_local_phase_offset: float = 0.0,
         focal_local_phase_centers_lamD: tuple[tuple[float, float], ...] = (),
+        focal_local_phase_shape: str = "circle",
         focal_local_phase_radius_lamD: float = 0.0,
+        focal_local_phase_inner_radius_lamD: float = 0.0,
+        focal_local_phase_outer_radius_lamD: float = 0.0,
         secondary_diameter_ratio: float = 0.0,
         spider_width_pixels: float = 0.0,
         spider_angles_deg: tuple[float, ...] = (0.0, 90.0),
         pupil_supersample: int = 1,
+        phase_screen_path: str | None = None,
+        phase_screen_index: int = 0,
     ):
         self.pupil_pixels = int(pupil_pixels)
         self.focal_sampling = float(focal_sampling)
@@ -135,11 +175,16 @@ class CoronagraphSimulator:
         self.focal_local_phase_centers_lamD = tuple(
             (float(x), float(y)) for x, y in focal_local_phase_centers_lamD
         )
+        self.focal_local_phase_shape = str(focal_local_phase_shape).strip().lower()
         self.focal_local_phase_radius_lamD = float(focal_local_phase_radius_lamD)
+        self.focal_local_phase_inner_radius_lamD = float(focal_local_phase_inner_radius_lamD)
+        self.focal_local_phase_outer_radius_lamD = float(focal_local_phase_outer_radius_lamD)
         self.secondary_diameter_ratio = float(secondary_diameter_ratio)
         self.spider_width_pixels = float(spider_width_pixels)
         self.spider_angles_deg = tuple(float(a) for a in spider_angles_deg)
         self.pupil_supersample = int(pupil_supersample)
+        self.phase_screen_path = None if phase_screen_path is None else str(phase_screen_path)
+        self.phase_screen_index = int(phase_screen_index)
         if not (0.0 <= self.ghost_coherence <= 1.0):
             raise ValueError("ghost_coherence must be in [0, 1].")
         if self.companion_flux_ratio < 0.0:
@@ -154,8 +199,22 @@ class CoronagraphSimulator:
             raise ValueError("spider_width_pixels must be >= 0.")
         if self.pupil_supersample < 1:
             raise ValueError("pupil_supersample must be >= 1.")
+        if self.phase_screen_index < 0:
+            raise ValueError("phase_screen_index must be >= 0.")
         if self.focal_local_phase_radius_lamD < 0.0:
             raise ValueError("focal_local_phase_radius_lamD must be >= 0.")
+        if self.focal_local_phase_shape not in {"circle", "ring"}:
+            raise ValueError("focal_local_phase_shape must be 'circle' or 'ring'.")
+        if self.focal_local_phase_inner_radius_lamD < 0.0:
+            raise ValueError("focal_local_phase_inner_radius_lamD must be >= 0.")
+        if self.focal_local_phase_outer_radius_lamD < 0.0:
+            raise ValueError("focal_local_phase_outer_radius_lamD must be >= 0.")
+        if self.focal_local_phase_shape == "ring":
+            if self.focal_local_phase_outer_radius_lamD <= self.focal_local_phase_inner_radius_lamD:
+                raise ValueError(
+                    "focal_local_phase_outer_radius_lamD must be greater than "
+                    "focal_local_phase_inner_radius_lamD for ring regions."
+                )
 
         # Ensures focal-plane sampling = N_fft / D_pixels.
         self.n_fft = int(np.ceil(self.pupil_pixels * self.focal_sampling))
@@ -374,29 +433,49 @@ class CoronagraphSimulator:
     def _local_focal_phase_map(self) -> np.ndarray:
         """
         Piecewise-constant focal-plane phase map (radians) on the first focal plane.
-        Non-zero only inside configured circular regions.
+        Non-zero only inside configured local regions.
         """
-        if (
-            np.isclose(self.focal_local_phase_offset, 0.0)
-            or self.focal_local_phase_radius_lamD <= 0.0
-            or len(self.focal_local_phase_centers_lamD) == 0
-        ):
+        if np.isclose(self.focal_local_phase_offset, 0.0):
             return np.zeros((self.n_fft, self.n_fft), dtype=float)
 
-        cache_key = (
-            self.n_fft,
-            self.focal_sampling,
-            self.focal_local_phase_radius_lamD,
-            self.focal_local_phase_centers_lamD,
-        )
+        if self.focal_local_phase_shape == "ring":
+            if self.focal_local_phase_outer_radius_lamD <= self.focal_local_phase_inner_radius_lamD:
+                return np.zeros((self.n_fft, self.n_fft), dtype=float)
+            cache_key = (
+                self.n_fft,
+                self.focal_sampling,
+                self.focal_local_phase_shape,
+                self.focal_local_phase_inner_radius_lamD,
+                self.focal_local_phase_outer_radius_lamD,
+            )
+        else:
+            if (
+                self.focal_local_phase_radius_lamD <= 0.0
+                or len(self.focal_local_phase_centers_lamD) == 0
+            ):
+                return np.zeros((self.n_fft, self.n_fft), dtype=float)
+            cache_key = (
+                self.n_fft,
+                self.focal_sampling,
+                self.focal_local_phase_shape,
+                self.focal_local_phase_radius_lamD,
+                self.focal_local_phase_centers_lamD,
+            )
         region = self._LOCAL_PHASE_REGION_CACHE.get(cache_key)
         if region is None:
             x_lamD = self._x / self.focal_sampling
             y_lamD = self._y / self.focal_sampling
-            region = np.zeros((self.n_fft, self.n_fft), dtype=bool)
-            r2 = self.focal_local_phase_radius_lamD**2
-            for xc, yc in self.focal_local_phase_centers_lamD:
-                region |= (x_lamD - xc) ** 2 + (y_lamD - yc) ** 2 <= r2
+            if self.focal_local_phase_shape == "ring":
+                rr = np.sqrt(x_lamD**2 + y_lamD**2)
+                region = (
+                    (rr >= self.focal_local_phase_inner_radius_lamD)
+                    & (rr <= self.focal_local_phase_outer_radius_lamD)
+                )
+            else:
+                region = np.zeros((self.n_fft, self.n_fft), dtype=bool)
+                r2 = self.focal_local_phase_radius_lamD**2
+                for xc, yc in self.focal_local_phase_centers_lamD:
+                    region |= (x_lamD - xc) ** 2 + (y_lamD - yc) ** 2 <= r2
             self._LOCAL_PHASE_REGION_CACHE[cache_key] = region
 
         return self.focal_local_phase_offset * region.astype(float)
@@ -409,6 +488,82 @@ class CoronagraphSimulator:
         lyot_stop = self.circular_pupil(self.lyot_scale * self.pupil_pixels)
         self._LYOT_STOP_CACHE[cache_key] = lyot_stop
         return lyot_stop
+
+    @staticmethod
+    def _load_phase_screen_cube(path: str) -> np.ndarray:
+        cached = CoronagraphSimulator._PHASE_SCREEN_CUBE_CACHE.get(path)
+        if cached is not None:
+            return cached
+        try:
+            from astropy.io import fits
+        except ImportError as exc:
+            raise ImportError("astropy is required to load phase-screen FITS files.") from exc
+        with fits.open(path, memmap=True) as hdul:
+            data = hdul[0].data
+            if data is None:
+                raise ValueError(f"Phase-screen FITS file has no primary data: {path}")
+            cube = np.asarray(data, dtype=float)
+        CoronagraphSimulator._PHASE_SCREEN_CUBE_CACHE[path] = cube
+        return cube
+
+    @staticmethod
+    def _resample_phase_screen(screen: np.ndarray, output_shape: tuple[int, int]) -> np.ndarray:
+        """Bilinear-like separable resampling using NumPy interpolation only."""
+        src = np.asarray(screen, dtype=float)
+        if src.shape == output_shape:
+            return src.copy()
+
+        out_h, out_w = output_shape
+        in_h, in_w = src.shape
+        x_old = np.linspace(0.0, 1.0, in_w)
+        x_new = np.linspace(0.0, 1.0, out_w)
+        tmp = np.empty((in_h, out_w), dtype=float)
+        for row in range(in_h):
+            tmp[row, :] = np.interp(x_new, x_old, src[row, :])
+
+        y_old = np.linspace(0.0, 1.0, in_h)
+        y_new = np.linspace(0.0, 1.0, out_h)
+        out = np.empty((out_h, out_w), dtype=float)
+        for col in range(out_w):
+            out[:, col] = np.interp(y_new, y_old, tmp[:, col])
+        return out
+
+    def _pupil_phase_screen_map(self) -> np.ndarray:
+        if self.phase_screen_path is None:
+            return np.zeros((self.n_fft, self.n_fft), dtype=float)
+
+        cache_key = (
+            self.n_fft,
+            self.pupil_pixels,
+            self.phase_screen_path,
+            self.phase_screen_index,
+        )
+        cached = self._PHASE_SCREEN_MAP_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        cube = self._load_phase_screen_cube(self.phase_screen_path)
+        if cube.ndim == 3:
+            if self.phase_screen_index >= cube.shape[0]:
+                raise IndexError(
+                    f"phase_screen_index={self.phase_screen_index} is out of bounds for "
+                    f"{self.phase_screen_path} with {cube.shape[0]} screens."
+                )
+            screen = cube[self.phase_screen_index]
+        elif cube.ndim == 2:
+            screen = cube
+        else:
+            raise ValueError(
+                f"Phase-screen data must be 2D or 3D, got shape {cube.shape} from {self.phase_screen_path}."
+            )
+
+        sampled = self._resample_phase_screen(np.asarray(screen, dtype=float), (self.pupil_pixels, self.pupil_pixels))
+        phase_map = np.zeros((self.n_fft, self.n_fft), dtype=float)
+        start = (self.n_fft - self.pupil_pixels) // 2
+        stop = start + self.pupil_pixels
+        phase_map[start:stop, start:stop] = sampled
+        self._PHASE_SCREEN_MAP_CACHE[cache_key] = phase_map
+        return phase_map
 
     def _apply_focal_shift_phase_ramp(self, e_pupil: np.ndarray) -> np.ndarray:
         """Apply focal-plane subpixel shift using a phase ramp in the entrance pupil."""
@@ -454,11 +609,16 @@ class CoronagraphSimulator:
             e_final_phase_offset=self.e_final_phase_offset,
             focal_local_phase_offset=self.focal_local_phase_offset,
             focal_local_phase_centers_lamD=self.focal_local_phase_centers_lamD,
+            focal_local_phase_shape=self.focal_local_phase_shape,
             focal_local_phase_radius_lamD=self.focal_local_phase_radius_lamD,
+            focal_local_phase_inner_radius_lamD=self.focal_local_phase_inner_radius_lamD,
+            focal_local_phase_outer_radius_lamD=self.focal_local_phase_outer_radius_lamD,
             secondary_diameter_ratio=self.secondary_diameter_ratio,
             spider_width_pixels=self.spider_width_pixels,
             spider_angles_deg=self.spider_angles_deg,
             pupil_supersample=self.pupil_supersample,
+            phase_screen_path=self.phase_screen_path,
+            phase_screen_index=self.phase_screen_index,
         )
         return clone.run()
 
@@ -470,6 +630,8 @@ class CoronagraphSimulator:
     def run(self) -> dict:
         entrance_pupil = self.entrance_pupil()
         e_pupil = self.source_amplitude * entrance_pupil.astype(np.complex128)
+        pupil_phase_screen = self._pupil_phase_screen_map()
+        e_pupil *= np.exp(1j * pupil_phase_screen)
         e_pupil = self._apply_focal_shift_phase_ramp(e_pupil)
 
         e_focal_before_mask = self._centered_fft2(e_pupil)
@@ -611,12 +773,15 @@ class CoronagraphSimulator:
             "spider_width_pixels": self.spider_width_pixels,
             "spider_angles_deg": self.spider_angles_deg,
             "pupil_supersample": self.pupil_supersample,
+            "phase_screen_path": self.phase_screen_path,
+            "phase_screen_index": self.phase_screen_index,
             "companion_flux_ratio": self.companion_flux_ratio,
             "companion_offset_lamD": self.companion_offset_lamD,
             "include_companion_ghost": self.include_companion_ghost,
             "source_amplitude": self.source_amplitude,
             "normalization_peak": norm,
             "pupil": entrance_pupil,
+            "pupil_phase_screen": pupil_phase_screen,
             "mask": mask,
             "lyot_field": e_lyot,
             "lyot_stop": lyot_stop,
@@ -654,6 +819,9 @@ class CoronagraphSimulator:
             "radial_delta_abs_mean": delta_abs_mean,
             "e_final_phase_offset": self.e_final_phase_offset,
             "focal_local_phase_offset": self.focal_local_phase_offset,
+            "focal_local_phase_shape": self.focal_local_phase_shape,
             "focal_local_phase_radius_lamD": self.focal_local_phase_radius_lamD,
             "focal_local_phase_centers_lamD": self.focal_local_phase_centers_lamD,
+            "focal_local_phase_inner_radius_lamD": self.focal_local_phase_inner_radius_lamD,
+            "focal_local_phase_outer_radius_lamD": self.focal_local_phase_outer_radius_lamD,
         }

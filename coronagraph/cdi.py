@@ -5,6 +5,7 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
+from .region_shapes import build_touching_circle_ring
 from .simulator import CoronagraphSimulator
 
 
@@ -333,11 +334,33 @@ def snr_annulus(
     if np.sum(annulus_noise) < 10:
         raise RuntimeError("Annulus contains too few noise pixels; increase annulus_half_width_px.")
 
-    target_peak = float(np.max(data[target_disk]))
-    noise_std = float(np.std(data[annulus_noise]))
-    snr = target_peak / max(noise_std, eps)
+    target_sum = float(np.sum(data[target_disk]))
+
+    anchor_angle = math.atan2(ty - sy, tx - sx)
+    ring = build_touching_circle_ring(
+        requested_region_radius_lamD=float(target_radius_px),
+        orbit_radius_lamD=float(target_dist),
+        anchor_angle_rad=float(anchor_angle),
+        rotation_fraction=0.0,
+    )
+
+    aperture_sums: list[float] = []
+    for cx_rel, cy_rel in ring["centers_lamD"]:
+        cx = sx + float(cx_rel)
+        cy = sy + float(cy_rel)
+        aperture_mask = (x - cx) ** 2 + (y - cy) ** 2 <= float(target_radius_px) ** 2
+        if not np.any(aperture_mask):
+            continue
+        if np.any(aperture_mask & target_disk):
+            continue
+        if not np.all(annulus_noise[aperture_mask]):
+            continue
+        aperture_sums.append(float(np.sum(data[aperture_mask])))
+
+    noise_std = float(np.std(np.asarray(aperture_sums, dtype=float))) if len(aperture_sums) > 0 else float("nan")
+    snr = target_sum / max(noise_std, eps)
     return {
-        "target_peak": target_peak,
+        "target_sum": target_sum,
         "noise_std_annulus": noise_std,
         "snr": snr,
         "target_distance_from_star_px": target_dist,

@@ -18,7 +18,8 @@ if __package__:
         plot_results,
         save_phase_mask_fits,
     )
-    from .simulator import CoronagraphSimulator
+    from .region_shapes import normalize_region_shape
+    from .simulator import CoronagraphSimulator, resolve_phase_screen_path
     from .sweeps import sweep_roddier_phase_for_peak_match, sweep_roddier_radius_for_peak_match
 else:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,11 +33,15 @@ else:
         plot_results,
         save_phase_mask_fits,
     )
-    from coronagraph.simulator import CoronagraphSimulator
+    from coronagraph.simulator import CoronagraphSimulator, resolve_phase_screen_path
     from coronagraph.sweeps import (
         sweep_roddier_phase_for_peak_match,
         sweep_roddier_radius_for_peak_match,
     )
+
+
+def _parse_region_shape(value: str) -> str:
+    return normalize_region_shape(value)
 
 
 def default_sim_kwargs() -> dict:
@@ -62,6 +67,8 @@ def default_sim_kwargs() -> dict:
         spider_width_pixels=0.0,
         spider_angles_deg=(0.0, 90.0),
         pupil_supersample=1,
+        phase_screen_path=None,
+        phase_screen_index=0,
     )
 
 
@@ -113,6 +120,13 @@ def print_run_header(result: dict) -> None:
     print(f"Spider width: {result['spider_width_pixels']:.3f} px")
     print(f"Spider angles: {result['spider_angles_deg']} deg")
     print(f"Pupil supersampling: {result['pupil_supersample']}x")
+    if "incoherence_map_mode" in result:
+        print(f"Incoherence map mode: {result['incoherence_map_mode']}")
+    print(
+        "Pupil phase screen: "
+        f"{result['phase_screen_path'] if result['phase_screen_path'] is not None else 'disabled'}"
+    )
+    print(f"Phase screen index: {result['phase_screen_index']}")
 
 
 def print_progress_bar(
@@ -287,6 +301,26 @@ def parse_args() -> argparse.Namespace:
         help="Entrance-pupil supersampling factor per axis (>=1).",
     )
     parser.add_argument(
+        "--phase-screen-jitter",
+        choices=["none", "0", "5", "10", "20"],
+        default="none",
+        help=(
+            "Entrance-pupil phase-screen jitter choice. "
+            "Uses the first screen in the selected FITS cube."
+        ),
+    )
+    parser.add_argument(
+        "--incoherence-map-mode",
+        choices=["fft_band", "lab_fft_ratio"],
+        default="fft_band",
+        help=(
+            "How to build simulation incoherence maps: "
+            "'fft_band' keeps the existing low-frequency FFT-band sum, "
+            "'lab_fft_ratio' uses the lab-style inverse coherence ratio from the "
+            "strongest non-DC FFT peak."
+        ),
+    )
+    parser.add_argument(
         "--local-region-radius",
         type=float,
         default=2,
@@ -333,9 +367,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--region-shape",
-        choices=["circle"],
+        type=_parse_region_shape,
         default="circle",
-        help="Local FOV region shape (currently only circle).",
+        help="Local FOV region shape: 'circle', 'ring', or 'ring_of_circle'.",
     )
     parser.add_argument(
         "--fov-count",
@@ -354,6 +388,29 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Ring radius [λ/D] used when auto-expanding FOV centers.",
+    )
+    parser.add_argument(
+        "--ring-rotation-fraction",
+        type=float,
+        default=0.0,
+        help="Normalized ring_of_circle rotation in [0,1]: 0=centered on planet, 1=edge passes through planet center.",
+    )
+    parser.add_argument(
+        "--ring-rotation-sweep",
+        action="store_true",
+        help="Enable ring_of_circle rotation sweep from 0 to a max fraction with a fixed step.",
+    )
+    parser.add_argument(
+        "--ring-rotation-sweep-max",
+        type=float,
+        default=1.0,
+        help="Maximum ring_of_circle rotation fraction for the sweep.",
+    )
+    parser.add_argument(
+        "--ring-rotation-sweep-step",
+        type=float,
+        default=0.1,
+        help="Step size for the ring_of_circle rotation sweep.",
     )
     parser.add_argument(
         "--phase-step",
@@ -414,6 +471,76 @@ def parse_args() -> argparse.Namespace:
         default=0.25,
         help="ROI radius step [λ/D] for ROI-size sweep.",
     )
+    parser.add_argument(
+        "--planet-position-roi-size-sweep",
+        action="store_true",
+        help="Enable a 2D sweep over planet (radius, theta) location and ROI size.",
+    )
+    parser.add_argument(
+        "--planet-position-radius-min",
+        type=float,
+        default=0.5,
+        help="Minimum planet radius [λ/D] for the 2D planet-position sweep.",
+    )
+    parser.add_argument(
+        "--planet-position-radius-max",
+        type=float,
+        default=4.0,
+        help="Maximum planet radius [λ/D] for the 2D planet-position sweep.",
+    )
+    parser.add_argument(
+        "--planet-position-radius-step",
+        type=float,
+        default=0.5,
+        help="Planet radius step [λ/D] for the 2D planet-position sweep.",
+    )
+    parser.add_argument(
+        "--planet-position-theta-min-deg",
+        type=float,
+        default=-180.0,
+        help="Minimum planet theta [deg] for the 2D planet-position sweep.",
+    )
+    parser.add_argument(
+        "--planet-position-theta-max-deg",
+        type=float,
+        default=180.0,
+        help="Maximum planet theta [deg] for the 2D planet-position sweep.",
+    )
+    parser.add_argument(
+        "--planet-position-theta-step-deg",
+        type=float,
+        default=15.0,
+        help="Planet theta step [deg] for the 2D planet-position sweep.",
+    )
+    parser.add_argument(
+        "--planet-diagonal-roi-size-sweep",
+        action="store_true",
+        help="Enable a diagonal-only sweep over planet location and ROI size.",
+    )
+    parser.add_argument(
+        "--planet-diagonal-mode",
+        choices=["anti", "main"],
+        default="anti",
+        help="Diagonal to follow: 'anti' uses y=-x, 'main' uses y=x.",
+    )
+    parser.add_argument(
+        "--planet-diagonal-t-min",
+        type=float,
+        default=0.5,
+        help="Minimum diagonal parameter t [λ/D] for diagonal sweep.",
+    )
+    parser.add_argument(
+        "--planet-diagonal-t-max",
+        type=float,
+        default=4.0,
+        help="Maximum diagonal parameter t [λ/D] for diagonal sweep.",
+    )
+    parser.add_argument(
+        "--planet-diagonal-t-step",
+        type=float,
+        default=0.5,
+        help="Diagonal parameter step [λ/D] for diagonal sweep.",
+    )
     parser.add_argument("--coc-phase-samples", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--coc-phase-cycles", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--coc-planet-offset-x", type=float, default=None, help=argparse.SUPPRESS)
@@ -452,6 +579,8 @@ def _build_sim_kwargs(args: argparse.Namespace) -> dict:
     sim_kwargs["spider_width_pixels"] = float(args.spider_width)
     sim_kwargs["spider_angles_deg"] = tuple(float(a) for a in args.spider_angles)
     sim_kwargs["pupil_supersample"] = int(args.pupil_ss)
+    sim_kwargs["phase_screen_path"] = resolve_phase_screen_path(args.phase_screen_jitter)
+    sim_kwargs["phase_screen_index"] = 0
     sim_kwargs["companion_flux_ratio"] = float(args.planet_flux_ratio)
     sim_kwargs["companion_offset_lamD"] = (float(args.planet_offset_x), float(args.planet_offset_y))
     sim_kwargs["include_ghost"] = not bool(args.disable_ghost)
@@ -470,10 +599,15 @@ def _build_output_tags(args: argparse.Namespace, sim_kwargs: dict) -> tuple[str,
     effective_cycles = float(args.phase_cycles)
     phase_cycles_tag = f"_cycles_{float_filename_token(effective_cycles, precision=3)}"
     phase_sweep_mode_tag = f"_mode_{str(args.phase_sweep_mode).strip().lower()}"
-    single_region_tag = (
-        f"_fovsim_{int(args.fov_count)}_fovcenters_{int(args.fov_centers_count)}"
-        f"_shape_{str(args.region_shape)}"
-    )
+    region_shape = str(args.region_shape).strip().lower()
+    if region_shape == "ring_of_circle":
+        rotation_tag = float_filename_token(float(getattr(args, "ring_rotation_fraction", 0.0)), precision=3)
+        single_region_tag = f"_shape_{region_shape}_rotfrac_{rotation_tag}"
+    else:
+        single_region_tag = (
+            f"_fovsim_{int(args.fov_count)}_fovcenters_{int(args.fov_centers_count)}"
+            f"_shape_{region_shape}"
+        )
     ghost_suffix = f"_ghost_{'on' if sim_kwargs['include_ghost'] else 'off'}"
     return mask_output_tag, phase_cycles_tag, phase_sweep_mode_tag, single_region_tag, ghost_suffix
 
@@ -593,6 +727,7 @@ def main() -> None:
             fov_count=int(args.fov_count),
             single_region_ring_radius_lamD=args.single_region_ring_radius,
             single_region_step_diameter_fraction=0.25,
+            ring_rotation_fraction=float(args.ring_rotation_fraction),
             save_path=out,
         )
         print(f"Saved localized region phase sweep plot: {out}")
@@ -615,6 +750,7 @@ def main() -> None:
             fov_count=int(args.fov_count),
             single_region_ring_radius_lamD=args.single_region_ring_radius,
             single_region_step_diameter_fraction=0.25,
+            ring_rotation_fraction=float(args.ring_rotation_fraction),
             save_path=out,
         )
         print(f"Saved all-region FFT plot: {out}")

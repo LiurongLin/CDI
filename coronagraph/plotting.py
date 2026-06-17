@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
+from .region_shapes import annulus_radii_from_width, normalize_region_shape
 from .simulator import CoronagraphSimulator
 from .sweeps import sweep_local_region_phase_peaks
 
@@ -20,6 +21,42 @@ def _theta_back_and_forth(n: int, max_abs: float = np.pi) -> np.ndarray:
     arr = wrapped[np.asarray(order, dtype=int)]
     arr[np.abs(arr) < 1e-14] = 0.0
     return arr
+
+
+def _draw_local_region_outline(ax, region_shape_name: str, center: tuple[float, float], width_or_radius_lamD: float, orbit_radius_lamD: float, edgecolor: str, linewidth: float = 1.5, alpha: float = 1.0) -> None:
+    from matplotlib.patches import Circle
+
+    if region_shape_name == "ring":
+        ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
+            mid_radius_lamD=orbit_radius_lamD,
+            width_lamD=width_or_radius_lamD,
+        )
+        ax.add_patch(Circle((0.0, 0.0), float(ring_rmin_lamD), fill=False, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha))
+        ax.add_patch(Circle((0.0, 0.0), float(ring_rmax_lamD), fill=False, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha))
+        return
+    ax.add_patch(Circle(center, float(width_or_radius_lamD), fill=False, edgecolor=edgecolor, linewidth=linewidth, alpha=alpha))
+
+
+def _local_phase_region_kwargs_for_plot(region_shape_name: str, width_or_radius_lamD: float, orbit_radius_lamD: float, centers_lamD: list[tuple[float, float]]) -> dict:
+    if region_shape_name == "ring":
+        ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
+            mid_radius_lamD=orbit_radius_lamD,
+            width_lamD=width_or_radius_lamD,
+        )
+        return {
+            "focal_local_phase_shape": "ring",
+            "focal_local_phase_centers_lamD": (),
+            "focal_local_phase_radius_lamD": 0.0,
+            "focal_local_phase_inner_radius_lamD": float(ring_rmin_lamD),
+            "focal_local_phase_outer_radius_lamD": float(ring_rmax_lamD),
+        }
+    return {
+        "focal_local_phase_shape": "circle",
+        "focal_local_phase_centers_lamD": tuple((float(x), float(y)) for x, y in centers_lamD),
+        "focal_local_phase_radius_lamD": float(width_or_radius_lamD),
+        "focal_local_phase_inner_radius_lamD": 0.0,
+        "focal_local_phase_outer_radius_lamD": 0.0,
+    }
 
 
 def plot_results(result: dict, save_path: str = "charge2_coronagraph_simulation.png") -> None:
@@ -285,6 +322,7 @@ def plot_local_region_phase_peak_metrics(
     fov_count: int = 5,
     single_region_ring_radius_lamD: float | None = None,
     single_region_step_diameter_fraction: float = 0.25,
+    ring_rotation_fraction: float = 0.0,
     save_path: str = "local_region_phase_peak_intensity.png",
 ) -> dict:
     """
@@ -306,11 +344,13 @@ def plot_local_region_phase_peak_metrics(
         fov_count=fov_count,
         single_region_ring_radius_lamD=single_region_ring_radius_lamD,
         single_region_step_diameter_fraction=single_region_step_diameter_fraction,
+        ring_rotation_fraction=ring_rotation_fraction,
     )
 
     phase_offsets = sweep["phase_offsets_rad"]
     peaks = sweep["region_peak_curves"]
     centers = sweep["region_centers_lamD"]
+    effective_region_radius_lamD = float(sweep.get("region_radius_lamD", region_radius_lamD))
     single_moving = int(sweep.get("fov_count", 0)) == 1
 
     # Recompute a baseline PSF only for the left-panel context image.
@@ -339,7 +379,7 @@ def plot_local_region_phase_peak_metrics(
     )
     for i, (xc, yc) in enumerate(centers):
         ax_img.add_patch(
-            Circle((xc, yc), radius=region_radius_lamD, fill=False, edgecolor="cyan", linewidth=1.6)
+            Circle((xc, yc), radius=effective_region_radius_lamD, fill=False, edgecolor="cyan", linewidth=1.6)
         )
         ax_img.text(xc, yc, str(i + 1), color="white", fontsize=8, ha="center", va="center")
     if str(phase_sweep_mode).strip().lower() == "global":
@@ -406,6 +446,7 @@ def plot_local_region0_peak_fft(
     fov_count: int = 5,
     single_region_ring_radius_lamD: float | None = None,
     single_region_step_diameter_fraction: float = 0.25,
+    ring_rotation_fraction: float = 0.0,
     save_path: str = "local_region0_peak_fft.png",
 ) -> dict:
     """
@@ -426,10 +467,12 @@ def plot_local_region0_peak_fft(
         fov_count=fov_count,
         single_region_ring_radius_lamD=single_region_ring_radius_lamD,
         single_region_step_diameter_fraction=single_region_step_diameter_fraction,
+        ring_rotation_fraction=ring_rotation_fraction,
     )
 
     phase_offsets = np.asarray(sweep["phase_offsets_rad"], dtype=float)
     centers_lamD = np.asarray(sweep["region_centers_lamD"], dtype=float)
+    effective_region_radius_lamD = float(sweep.get("region_radius_lamD", region_radius_lamD))
     single_moving = int(sweep.get("fov_count", 0)) == 1
 
     base_kwargs = dict(sim_kwargs)
@@ -458,7 +501,7 @@ def plot_local_region0_peak_fft(
             frame_kwargs["focal_local_phase_centers_lamD"] = tuple(
                 (float(x), float(y)) for x, y in sweep["region_centers_lamD"]
             )
-            frame_kwargs["focal_local_phase_radius_lamD"] = float(region_radius_lamD)
+            frame_kwargs["focal_local_phase_radius_lamD"] = effective_region_radius_lamD
         frame = CoronagraphSimulator(**frame_kwargs).run()["final_psf_with_ghost"]
         for r in range(centers_lamD.shape[0]):
             y_idx = int(center_pixel_yx[r, 0])
@@ -603,6 +646,167 @@ def _coc_strongest_peak_in_band(freqs: np.ndarray, mag: np.ndarray, fmin: float,
     return float(xx[i]), float(yy[i])
 
 
+def _top_fraction_mean(values: np.ndarray, fraction: float = 0.10) -> float:
+    arr = np.asarray(values, dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return float("nan")
+    frac = float(fraction)
+    if not (0.0 < frac <= 1.0):
+        raise ValueError("fraction must be in (0, 1].")
+    n_keep = max(1, int(np.ceil(arr.size * frac)))
+    top = np.partition(arr, -n_keep)[-n_keep:]
+    return float(np.mean(top))
+
+
+def _coc_frequency_selection_spectrum(
+    freq_bins: np.ndarray,
+    central_stack_fft: np.ndarray,
+    planet_region_mask: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    stack = np.asarray(central_stack_fft, dtype=float)
+    if stack.ndim != 3 or stack.shape[0] < 2:
+        return {
+            "phase_trace": np.array([], dtype=float),
+            "nonnegative_freqs": np.array([], dtype=float),
+            "nonnegative_mag": np.array([], dtype=float),
+            "positive_freqs": np.array([], dtype=float),
+            "positive_mag": np.array([], dtype=float),
+        }
+
+    if planet_region_mask is not None:
+        mask = np.asarray(planet_region_mask, dtype=bool)
+        if mask.shape != stack.shape[1:] or not np.any(mask):
+            return {
+                "phase_trace": np.array([], dtype=float),
+                "nonnegative_freqs": np.array([], dtype=float),
+                "nonnegative_mag": np.array([], dtype=float),
+                "positive_freqs": np.array([], dtype=float),
+                "positive_mag": np.array([], dtype=float),
+            }
+        phase_trace = np.sum(stack[:, mask], axis=1)
+    else:
+        phase_trace = np.mean(stack, axis=(1, 2))
+
+    phase_trace = np.asarray(phase_trace, dtype=float)
+    mag = np.abs(np.fft.fft(phase_trace))
+    freq = np.asarray(freq_bins, dtype=float)
+    nonnegative = freq >= -1e-12
+    positive = freq > 1e-12
+    return {
+        "phase_trace": phase_trace,
+        "nonnegative_freqs": freq[nonnegative],
+        "nonnegative_mag": mag[nonnegative],
+        "positive_freqs": freq[positive],
+        "positive_mag": mag[positive],
+    }
+
+
+def _coc_select_lab_peak_frequency(
+    freq_bins: np.ndarray,
+    central_stack_fft: np.ndarray,
+    planet_region_mask: np.ndarray | None = None,
+    fallback_freq: float = 0.159,
+) -> float:
+    """Pick the strongest positive non-DC FFT peak from a 1D phase trace."""
+    freq = np.asarray(freq_bins, dtype=float)
+    stack = np.asarray(central_stack_fft, dtype=float)
+    if stack.ndim != 3 or stack.shape[0] < 2:
+        return float(fallback_freq)
+
+    spectrum = _coc_frequency_selection_spectrum(
+        freq_bins=freq_bins,
+        central_stack_fft=central_stack_fft,
+        planet_region_mask=planet_region_mask,
+    )
+    pos_freqs = np.asarray(spectrum["positive_freqs"], dtype=float)
+    pos_mag = np.asarray(spectrum["positive_mag"], dtype=float)
+    if pos_freqs.size == 0 or pos_mag.size == 0:
+        return float(fallback_freq)
+    best_local = int(np.argmax(pos_mag))
+    return float(pos_freqs[best_local])
+
+
+def _coc_build_incoherence_maps(
+    *,
+    freq_bins: np.ndarray,
+    fft_cube: np.ndarray,
+    central_stack_fft: np.ndarray,
+    mode: str,
+    planet_region_mask: np.ndarray | None = None,
+    fallback_target_freq: float = 0.159,
+) -> dict:
+    mode_name = str(mode).strip().lower()
+    abs_freq = np.abs(freq_bins)
+    band_a_min, band_a_max = 0.0, 0.02
+    band_a_mask = (abs_freq >= band_a_min) & (abs_freq <= band_a_max)
+    band_a_freqs = [float(v) for v in freq_bins[band_a_mask]]
+    n_band_a_bins = int(np.count_nonzero(band_a_mask))
+    band_sum_map = (
+        np.sum(np.abs(fft_cube[band_a_mask]), axis=0) / float(n_band_a_bins)
+        if n_band_a_bins > 0
+        else np.zeros(fft_cube.shape[1:], dtype=float)
+    )
+
+    if mode_name == "lab_fft_ratio":
+        spectrum_info = _coc_frequency_selection_spectrum(
+            freq_bins=freq_bins,
+            central_stack_fft=central_stack_fft,
+            planet_region_mask=planet_region_mask,
+        )
+        selected_target_freq = _coc_select_lab_peak_frequency(
+            freq_bins=freq_bins,
+            central_stack_fft=central_stack_fft,
+            planet_region_mask=planet_region_mask,
+            fallback_freq=fallback_target_freq,
+        )
+    else:
+        spectrum_info = _coc_frequency_selection_spectrum(
+            freq_bins=freq_bins,
+            central_stack_fft=central_stack_fft,
+            planet_region_mask=planet_region_mask,
+        )
+        selected_target_freq = float(fallback_target_freq)
+
+    dc_idx = int(np.argmin(np.abs(freq_bins - 0.0)))
+    target_idx = int(np.argmin(np.abs(freq_bins - selected_target_freq)))
+    selected_target_freq = float(freq_bins[target_idx])
+    dc_amp_map = np.abs(fft_cube[dc_idx])
+    target_amp_map = np.abs(fft_cube[target_idx])
+    dc_amp_safe = np.maximum(dc_amp_map, 1e-20)
+    target_amp_safe = np.maximum(target_amp_map, 1e-20)
+    coherence_map = target_amp_map / dc_amp_safe
+    inverse_coherence_map = dc_amp_map / target_amp_safe
+
+    if mode_name == "lab_fft_ratio":
+        incoherence_map = inverse_coherence_map
+        incoherence_title = (
+            f"Incoherence (lab-style: |FFT(0)| / |FFT({selected_target_freq:.3f})|)"
+        )
+    else:
+        incoherence_map = band_sum_map
+        incoherence_title = "Incoherence (FFT magnitude band: 0-0.02)"
+
+    return {
+        "mode": mode_name,
+        "band_a_min": float(band_a_min),
+        "band_a_max": float(band_a_max),
+        "band_a_mask": band_a_mask,
+        "band_a_freqs": band_a_freqs,
+        "selected_target_freq": selected_target_freq,
+        "target_idx": target_idx,
+        "coherence_map": coherence_map,
+        "inverse_coherence_map": inverse_coherence_map,
+        "incoherence_map": incoherence_map,
+        "incoherence_title": incoherence_title,
+        "selection_phase_trace": np.asarray(spectrum_info["phase_trace"], dtype=float),
+        "selection_nonnegative_freqs": np.asarray(spectrum_info["nonnegative_freqs"], dtype=float),
+        "selection_nonnegative_mag": np.asarray(spectrum_info["nonnegative_mag"], dtype=float),
+        "selection_positive_freqs": np.asarray(spectrum_info["positive_freqs"], dtype=float),
+        "selection_positive_mag": np.asarray(spectrum_info["positive_mag"], dtype=float),
+    }
+
+
 def _plot_coc_planet_phase_outputs_impl(
     args,
     base: dict,
@@ -620,6 +824,7 @@ def _plot_coc_planet_phase_outputs_impl(
     central_phase_stack: np.ndarray,
 ) -> dict:
     from matplotlib.patches import Circle
+    region_shape_name = normalize_region_shape(getattr(args, "region_shape", "circle"))
     coc_phase_cycles = (
         float(args.coc_phase_cycles)
         if getattr(args, "coc_phase_cycles", None) is not None
@@ -644,7 +849,7 @@ def _plot_coc_planet_phase_outputs_impl(
                 if j != active_idx:
                     integrated_intensity_display[j, i] = np.nan
 
-    central_box_lamD = 16.0
+    central_box_lamD = 12.0
     phase_map_fft = phase_offsets.copy()
     central_stack_fft = central_phase_stack.copy()
     if (
@@ -654,46 +859,7 @@ def _plot_coc_planet_phase_outputs_impl(
     ):
         phase_map_fft = phase_map_fft[:-1]
         central_stack_fft = central_stack_fft[:-1]
-    dphi_map = float(np.mean(np.diff(phase_map_fft)))
-    freq_bins = np.fft.fftfreq(central_stack_fft.shape[0], d=dphi_map)
-    fft_cube = np.fft.fft(central_stack_fft, axis=0)
-
-    band_a_min, band_a_max = 0.0, 0.02
-    band_b_min, band_b_max = 0.14, 0.17
-    abs_freq = np.abs(freq_bins)
-    band_a_mask = (abs_freq >= band_a_min) & (abs_freq <= band_a_max)
-    band_b_mask = (abs_freq >= band_b_min) & (abs_freq <= band_b_max)
-    fft_band_a = np.zeros_like(fft_cube, dtype=np.complex128)
-    fft_band_a[band_a_mask] = fft_cube[band_a_mask]
-    recon_band_a = np.fft.ifft(fft_band_a, axis=0).real
-    incoherence_map = np.mean(recon_band_a, axis=0)
-
-    n_band_a_bins = int(np.count_nonzero(band_a_mask))
-    if n_band_a_bins > 0 and int(np.count_nonzero(band_b_mask)) > 0:
-        band_a_ref = np.sum(np.abs(fft_cube[band_a_mask]), axis=0) / float(n_band_a_bins)
-        band_a_ref = np.maximum(band_a_ref, 1e-20)
-        fft_ratio = np.zeros_like(fft_cube, dtype=np.complex128)
-        fft_ratio[band_b_mask] = fft_cube[band_b_mask] / band_a_ref[None, :, :]
-        recon_ratio = np.fft.ifft(fft_ratio, axis=0).real
-        coherence_map = np.max(np.abs(recon_ratio), axis=0)
-    else:
-        coherence_map = np.zeros(fft_cube.shape[1:], dtype=float)
-
-    fig_maps, axes_maps = plt.subplots(1, 3, figsize=(13.8, 4.3), constrained_layout=True)
-    extent16 = [-0.5 * central_box_lamD, 0.5 * central_box_lamD, -0.5 * central_box_lamD, 0.5 * central_box_lamD]
-    im0 = axes_maps[0].imshow(np.log10(np.mean(central_stack_fft, axis=0) + 1e-12), origin="lower", cmap="inferno", extent=extent16)
-    axes_maps[0].set_title("Central 16x16 λ/D Mean Intensity")
-    axes_maps[0].set_xlabel("x [λ/D]")
-    axes_maps[0].set_ylabel("y [λ/D]")
-    fig_maps.colorbar(im0, ax=axes_maps[0], fraction=0.046, pad=0.04)
-    im1 = axes_maps[1].imshow(incoherence_map, origin="lower", cmap="viridis", extent=extent16)
-    axes_maps[1].set_title("Incoherence (iFFT band: 0-0.02)")
-    axes_maps[1].set_xlabel("x [λ/D]")
-    axes_maps[1].set_ylabel("y [λ/D]")
-    fig_maps.colorbar(im1, ax=axes_maps[1], fraction=0.046, pad=0.04)
-    # Planet-region peak and annular median (1 λ/D width) on incoherence map.
-    # SNR is defined as: peak(planet region) / median(annulus containing planet radius).
-    n16y, n16x = incoherence_map.shape
+    n16y, n16x = central_stack_fft.shape[1:]
     x16 = np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, n16x, endpoint=False)
     y16 = np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, n16y, endpoint=False)
     xx16, yy16 = np.meshgrid(x16, y16)
@@ -704,8 +870,42 @@ def _plot_coc_planet_phase_outputs_impl(
         (xx16 - planet_center[0]) ** 2 + (yy16 - planet_center[1]) ** 2
         <= float(planet_eval_radius_lamD) ** 2
     )
+    dphi_map = float(np.mean(np.diff(phase_map_fft)))
+    freq_bins = np.fft.fftfreq(central_stack_fft.shape[0], d=dphi_map)
+    fft_cube = np.fft.fft(central_stack_fft, axis=0)
+    map_mode = str(getattr(args, "incoherence_map_mode", "fft_band")).strip().lower()
+    map_info = _coc_build_incoherence_maps(
+        freq_bins=freq_bins,
+        fft_cube=fft_cube,
+        central_stack_fft=central_stack_fft,
+        mode=map_mode,
+        planet_region_mask=planet_region_mask_16,
+    )
+    band_a_min = float(map_info["band_a_min"])
+    band_a_max = float(map_info["band_a_max"])
+    band_a_mask = np.asarray(map_info["band_a_mask"], dtype=bool)
+    incoherence_map = np.asarray(map_info["incoherence_map"], dtype=float)
+    coherence_map = np.asarray(map_info["coherence_map"], dtype=float)
+    inverse_coherence_map = np.asarray(map_info["inverse_coherence_map"], dtype=float)
+    selected_target_freq = float(map_info["selected_target_freq"])
+    selection_phase_trace = np.asarray(map_info.get("selection_phase_trace", np.array([], dtype=float)), dtype=float)
+    selection_nonnegative_freqs = np.asarray(map_info.get("selection_nonnegative_freqs", np.array([], dtype=float)), dtype=float)
+    selection_nonnegative_mag = np.asarray(map_info.get("selection_nonnegative_mag", np.array([], dtype=float)), dtype=float)
+
+    fig_maps, axes_maps = plt.subplots(1, 4, figsize=(18.2, 4.3), constrained_layout=True)
+    extent16 = [-0.5 * central_box_lamD, 0.5 * central_box_lamD, -0.5 * central_box_lamD, 0.5 * central_box_lamD]
+    im0 = axes_maps[0].imshow(np.log10(np.mean(central_stack_fft, axis=0) + 1e-12), origin="lower", cmap="inferno", extent=extent16)
+    axes_maps[0].set_title("Central 12x12 λ/D Mean Intensity")
+    axes_maps[0].set_xlabel("x [λ/D]")
+    axes_maps[0].set_ylabel("y [λ/D]")
+    fig_maps.colorbar(im0, ax=axes_maps[0], fraction=0.046, pad=0.04)
+    im1 = axes_maps[1].imshow(incoherence_map, origin="lower", cmap="viridis", extent=extent16)
+    axes_maps[1].set_title(str(map_info["incoherence_title"]))
+    axes_maps[1].set_xlabel("x [λ/D]")
+    axes_maps[1].set_ylabel("y [λ/D]")
+    fig_maps.colorbar(im1, ax=axes_maps[1], fraction=0.046, pad=0.04)
     planet_peak_incoh = (
-        float(np.max(incoherence_map[planet_region_mask_16]))
+        _top_fraction_mean(incoherence_map[planet_region_mask_16], fraction=0.10)
         if np.any(planet_region_mask_16)
         else float("nan")
     )
@@ -729,7 +929,7 @@ def _plot_coc_planet_phase_outputs_impl(
         Circle((0.0, 0.0), planet_r_lamD + ring_half_width, fill=False, edgecolor="white", linewidth=1.1, linestyle="--")
     )
     axes_maps[1].add_patch(
-        Circle((planet_center[0], planet_center[1]), float(planet_eval_radius_lamD), fill=False, edgecolor="yellow", linewidth=1.1)
+        Circle((planet_center[0], planet_center[1]), float(planet_eval_radius_lamD), fill=False, edgecolor="yellow", linewidth=0.8)
     )
     axes_maps[1].text(
         0.02,
@@ -747,18 +947,44 @@ def _plot_coc_planet_phase_outputs_impl(
         bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.55, edgecolor="none"),
     )
     im2 = axes_maps[2].imshow(coherence_map, origin="lower", cmap="magma", extent=extent16)
-    axes_maps[2].set_title("Coherence (iFFT of band-B / band-A ratio)")
+    axes_maps[2].set_title(f"Coherence (|FFT({selected_target_freq:.3f})| / |FFT(0)|)")
     axes_maps[2].set_xlabel("x [λ/D]")
     axes_maps[2].set_ylabel("y [λ/D]")
     fig_maps.colorbar(im2, ax=axes_maps[2], fraction=0.046, pad=0.04)
-    out_maps = f"{coc_planet_ratio_dir}/coc_planet_coherence_incoherence_maps_16lamD_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png"
+    im3 = axes_maps[3].imshow(inverse_coherence_map, origin="lower", cmap="cividis", extent=extent16)
+    axes_maps[3].set_title(f"1 / Coherence (|FFT(0)| / |FFT({selected_target_freq:.3f})|)")
+    axes_maps[3].set_xlabel("x [λ/D]")
+    axes_maps[3].set_ylabel("y [λ/D]")
+    fig_maps.colorbar(im3, ax=axes_maps[3], fraction=0.046, pad=0.04)
+    out_maps = f"{coc_planet_ratio_dir}/coc_planet_coherence_incoherence_maps_12lamD_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png"
     fig_maps.savefig(out_maps, dpi=170, bbox_inches="tight")
     plt.close(fig_maps)
+
+    out_selection_spectrum = None
+    if selection_phase_trace.size > 0 and selection_nonnegative_freqs.size > 0 and selection_nonnegative_mag.size > 0:
+        fig_spec, axes_spec = plt.subplots(1, 2, figsize=(10.5, 4.0), constrained_layout=True)
+        axes_spec[0].plot(np.asarray(phase_map_fft, dtype=float), selection_phase_trace, color="tab:blue", lw=1.6)
+        axes_spec[0].set_title("Planet-Aperture Sum vs Phase")
+        axes_spec[0].set_xlabel("phase offset [rad]")
+        axes_spec[0].set_ylabel("summed intensity")
+        axes_spec[0].grid(alpha=0.3)
+        axes_spec[1].plot(selection_nonnegative_freqs, selection_nonnegative_mag, color="tab:orange", lw=1.6)
+        axes_spec[1].axvline(selected_target_freq, color="crimson", lw=1.3, ls="--")
+        axes_spec[1].set_title("FFT Spectrum Used for Frequency Selection")
+        axes_spec[1].set_xlabel("frequency [cycles/rad]")
+        axes_spec[1].set_ylabel("|FFT|")
+        axes_spec[1].grid(alpha=0.3)
+        out_selection_spectrum = (
+            f"{coc_planet_ratio_dir}/coc_planet_frequency_selection_spectrum_12lamD_"
+            f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png"
+        )
+        fig_spec.savefig(out_selection_spectrum, dpi=170, bbox_inches="tight")
+        plt.close(fig_spec)
 
     out_maps_per_fov_pdf = None
     if bool(getattr(args, "build_map_per_fov", False)):
         out_maps_per_fov_pdf = (
-            f"{coc_planet_ratio_dir}/coc_planet_incoherence_maps_per_fov_16lamD_"
+            f"{coc_planet_ratio_dir}/coc_planet_incoherence_maps_per_fov_12lamD_"
             f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.pdf"
         )
         phase_series = np.asarray(phase_offsets, dtype=float)
@@ -824,17 +1050,18 @@ def _plot_coc_planet_phase_outputs_impl(
                 dphi_local = float(np.mean(np.diff(local_phase)))
                 local_freq = np.fft.fftfreq(local_stack.shape[0], d=dphi_local)
                 local_fft = np.fft.fft(local_stack, axis=0)
-                local_abs = np.abs(local_freq)
-                local_band_a = (local_abs >= band_a_min) & (local_abs <= band_a_max)
-                if not np.any(local_band_a):
-                    continue
-                local_fft_a = np.zeros_like(local_fft, dtype=np.complex128)
-                local_fft_a[local_band_a] = local_fft[local_band_a]
-                local_recon_a = np.fft.ifft(local_fft_a, axis=0).real
-                local_incoh = np.mean(local_recon_a, axis=0)
+                local_map_info = _coc_build_incoherence_maps(
+                    freq_bins=local_freq,
+                    fft_cube=local_fft,
+                    central_stack_fft=local_stack,
+                    mode=map_mode,
+                    planet_region_mask=planet_region_mask_16,
+                    fallback_target_freq=selected_target_freq,
+                )
+                local_incoh = np.asarray(local_map_info["incoherence_map"], dtype=float)
 
                 planet_peak_local = (
-                    float(np.max(local_incoh[planet_region_mask_16]))
+                    _top_fraction_mean(local_incoh[planet_region_mask_16], fraction=0.10)
                     if np.any(planet_region_mask_16)
                     else float("nan")
                 )
@@ -852,20 +1079,22 @@ def _plot_coc_planet_phase_outputs_impl(
 
                 fig_fov, ax_fov = plt.subplots(1, 1, figsize=(7.0, 6.0), constrained_layout=True)
                 im_fov = ax_fov.imshow(local_incoh, origin="lower", cmap="viridis", extent=extent16)
-                ax_fov.set_title(f"Incoherence Map per Active FOV: {label}")
+                ax_fov.set_title(
+                    f"Incoherence Map per Active FOV: {label}\nmode={map_mode}"
+                )
                 ax_fov.set_xlabel("x [λ/D]")
                 ax_fov.set_ylabel("y [λ/D]")
                 fig_fov.colorbar(im_fov, ax=ax_fov, fraction=0.046, pad=0.04)
                 active_center = _active_fov_center(label)
                 if active_center is not None:
-                    ax_fov.add_patch(
-                        Circle(
-                            (active_center[0], active_center[1]),
-                            float(args.local_region_radius),
-                            fill=False,
-                            edgecolor="red",
-                            linewidth=1.6,
-                        )
+                    _draw_local_region_outline(
+                        ax_fov,
+                        region_shape_name=region_shape_name,
+                        center=(active_center[0], active_center[1]),
+                        width_or_radius_lamD=float(args.local_region_radius),
+                        orbit_radius_lamD=planet_r_lamD,
+                        edgecolor="red",
+                        linewidth=1.6,
                     )
                     ax_fov.text(
                         active_center[0],
@@ -883,7 +1112,7 @@ def _plot_coc_planet_phase_outputs_impl(
                     Circle((0.0, 0.0), planet_r_lamD + ring_half_width, fill=False, edgecolor="white", linewidth=1.1, linestyle="--")
                 )
                 ax_fov.add_patch(
-                    Circle((planet_center[0], planet_center[1]), float(planet_eval_radius_lamD), fill=False, edgecolor="yellow", linewidth=1.1)
+                    Circle((planet_center[0], planet_center[1]), float(planet_eval_radius_lamD), fill=False, edgecolor="yellow", linewidth=0.8)
                 )
                 ax_fov.text(
                     0.02,
@@ -903,7 +1132,11 @@ def _plot_coc_planet_phase_outputs_impl(
                 pdf.savefig(fig_fov)
                 plt.close(fig_fov)
 
-    single_interval_mode = int(args.fov_count) == 1 and str(args.phase_sweep_mode).strip().lower() != "global"
+    single_interval_mode = (
+        region_shape_name != "ring"
+        and int(args.fov_count) == 1
+        and str(args.phase_sweep_mode).strip().lower() != "global"
+    )
     out_curve = None
 
     phase_fft = phase_offsets.copy()
@@ -963,14 +1196,30 @@ def _plot_coc_planet_phase_outputs_impl(
     out_fft = None
     plt.close(fig)
 
-    single_fov_mode = int(args.fov_count) == 1 and str(args.phase_sweep_mode).strip().lower() != "global"
+    single_fov_mode = (
+        region_shape_name != "ring"
+        and int(args.fov_count) == 1
+        and str(args.phase_sweep_mode).strip().lower() != "global"
+    )
     fig_overlay, ax_overlay = plt.subplots(1, 1, figsize=(6.7, 6.0), constrained_layout=True)
     im = ax_overlay.imshow(np.log10(base["final_psf_with_ghost"][sl, sl] + 1e-12), origin="lower", cmap="inferno", vmin=-8, vmax=0, extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD])
     for j, (cx, cy) in enumerate(centers):
         col = "lime" if j == planet_region_idx else "cyan"
-        ax_overlay.add_patch(Circle((cx, cy), float(args.local_region_radius), fill=False, edgecolor=col, linewidth=1.5))
+        _draw_local_region_outline(
+            ax_overlay,
+            region_shape_name=region_shape_name,
+            center=(cx, cy),
+            width_or_radius_lamD=float(args.local_region_radius),
+            orbit_radius_lamD=planet_r_lamD,
+            edgecolor=col,
+            linewidth=1.5,
+        )
         ax_overlay.text(cx, cy, str(j), color="white", fontsize=8, ha="center", va="center")
-    ax_overlay.set_title("Final PSF with 8 Circles (planet region in green)")
+    ax_overlay.set_title(
+        "Final PSF with Ring Region (planet region in green)"
+        if region_shape_name == "ring"
+        else "Final PSF with 8 Circles (planet region in green)"
+    )
     ax_overlay.set_xlabel("x [λ/D]")
     ax_overlay.set_ylabel("y [λ/D]")
     if single_fov_mode:
@@ -1047,7 +1296,15 @@ def _plot_coc_planet_phase_outputs_impl(
                 np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, central_stack_fft.shape[2], endpoint=False),
                 np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, central_stack_fft.shape[1], endpoint=False),
             )
-            m16 = (xx16 - cx) ** 2 + (yy16 - cy) ** 2 <= float(args.local_region_radius) ** 2
+            if region_shape_name == "ring":
+                ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
+                    mid_radius_lamD=planet_r_lamD,
+                    width_lamD=float(args.local_region_radius),
+                )
+                rr16 = np.sqrt(xx16**2 + yy16**2)
+                m16 = (rr16 >= ring_rmin_lamD) & (rr16 <= ring_rmax_lamD)
+            else:
+                m16 = (xx16 - cx) ** 2 + (yy16 - cy) ** 2 <= float(args.local_region_radius) ** 2
             if not np.any(m16):
                 continue
             # Full-sequence trace for this cycle-position (used by FFT).
@@ -1148,9 +1405,21 @@ def _plot_coc_planet_phase_outputs_impl(
     im_combined = ax2_c.imshow(np.log10(base["final_psf_with_ghost"][sl, sl] + 1e-12), origin="lower", cmap="inferno", vmin=-8, vmax=0, extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD])
     for j, (cx, cy) in enumerate(centers):
         col = "lime" if j == planet_region_idx else "cyan"
-        ax2_c.add_patch(Circle((cx, cy), float(args.local_region_radius), fill=False, edgecolor=col, linewidth=1.5))
+        _draw_local_region_outline(
+            ax2_c,
+            region_shape_name=region_shape_name,
+            center=(cx, cy),
+            width_or_radius_lamD=float(args.local_region_radius),
+            orbit_radius_lamD=planet_r_lamD,
+            edgecolor=col,
+            linewidth=1.5,
+        )
         ax2_c.text(cx, cy, str(j), color="white", fontsize=8, ha="center", va="center")
-    ax2_c.set_title("Final PSF with 8 Circles (planet region in green)")
+    ax2_c.set_title(
+        "Final PSF with Ring Region (planet region in green)"
+        if region_shape_name == "ring"
+        else "Final PSF with 8 Circles (planet region in green)"
+    )
     ax2_c.set_xlabel("x [λ/D]")
     ax2_c.set_ylabel("y [λ/D]")
     if single_fov_mode:
@@ -1179,22 +1448,30 @@ def _plot_coc_planet_phase_outputs_impl(
     plt.close(fig_combined)
 
     band_a_peak = _coc_strongest_peak_in_band(freqs[pos], amp[planet_region_idx, pos], 0.0, 0.025)
-    band_b_peak = _coc_strongest_peak_in_band(freqs[pos], amp[planet_region_idx, pos], 0.120, 0.180)
+    band_b_peak = _coc_strongest_peak_in_band(
+        freqs[pos],
+        amp[planet_region_idx, pos],
+        selected_target_freq - 0.01,
+        selected_target_freq + 0.01,
+    )
     return {
         "out_curve": out_curve,
         "out_fft": out_fft,
         "out_overlay": out_overlay,
         "out_fft_overlay": out_fft_overlay,
         "out_maps": out_maps,
+        "out_selection_spectrum": out_selection_spectrum,
         "out_maps_per_fov_pdf": out_maps_per_fov_pdf,
+        "incoherence_map_mode": map_mode,
         "f1_freqs": [float(v) for v in pfreq[p1]] if p1.size > 0 else [],
         "f2_freqs": [float(v) for v in pfreq[p2]] if p2.size > 0 else [],
-        "band_a_freqs": [float(v) for v in freq_bins[band_a_mask]],
-        "band_b_freqs": [float(v) for v in freq_bins[band_b_mask]],
+        "band_a_freqs": list(map_info["band_a_freqs"]),
+        "band_b_freqs": [selected_target_freq],
         "band_a_peak": band_a_peak,
         "band_b_peak": band_b_peak,
         "band_a_bounds": (band_a_min, band_a_max),
-        "band_b_bounds": (band_b_min, band_b_max),
+        "band_b_bounds": (selected_target_freq, selected_target_freq),
+        "coherence_target_freq": selected_target_freq,
         "incoherence_planet_region_peak": planet_peak_incoh,
         "incoherence_annulus_median": annulus_median_incoh,
         "incoherence_planet_snr": incoh_snr,
@@ -1228,10 +1505,10 @@ def plot_coc_fov_position_sweep(
     base = CoronagraphSimulator(**sim_local).run()
     n_fft = int(base["n_fft"])
     samp = float(base["focal_sampling"])
-    central_box_lamD = 16.0
-    half16 = int(0.5 * central_box_lamD * samp)
+    central_box_lamD = 12.0
+    half12 = int(0.5 * central_box_lamD * samp)
     cc16 = n_fft // 2
-    sl16 = slice(cc16 - half16, cc16 + half16)
+    sl16 = slice(cc16 - half12, cc16 + half12)
     local_region_radius = float(args.local_region_radius)
 
     centers: list[tuple[float, float]] = []
@@ -1283,9 +1560,9 @@ def plot_coc_fov_position_sweep(
             freq = np.fft.fftfreq(local_stack.shape[0], d=dphi)
             fft_cube = np.fft.fft(local_stack, axis=0)
             band_a = (np.abs(freq) >= 0.0) & (np.abs(freq) <= 0.02)
-            fft_a = np.zeros_like(fft_cube, dtype=np.complex128)
-            fft_a[band_a] = fft_cube[band_a]
-            incoh = np.mean(np.fft.ifft(fft_a, axis=0).real, axis=0)
+            if not np.any(band_a):
+                continue
+            incoh = np.sum(np.abs(fft_cube[band_a]), axis=0) / float(np.count_nonzero(band_a))
             maps.append(incoh)
 
             n16y, n16x = incoh.shape
@@ -1345,9 +1622,9 @@ def plot_coc_fov_position_sweep(
             freq = np.fft.fftfreq(stack.shape[0], d=dphi)
             fft_cube = np.fft.fft(stack, axis=0)
             band_a = (np.abs(freq) >= 0.0) & (np.abs(freq) <= 0.02)
-            fft_a = np.zeros_like(fft_cube, dtype=np.complex128)
-            fft_a[band_a] = fft_cube[band_a]
-            incoh = np.mean(np.fft.ifft(fft_a, axis=0).real, axis=0)
+            if not np.any(band_a):
+                continue
+            incoh = np.sum(np.abs(fft_cube[band_a]), axis=0) / float(np.count_nonzero(band_a))
             maps.append(incoh)
 
             n16y, n16x = incoh.shape

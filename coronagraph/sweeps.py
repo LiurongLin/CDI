@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .masks import RoddierPhaseMask
+from .region_shapes import annulus_radii_from_width, build_touching_circle_ring, normalize_region_shape
 from .simulator import CoronagraphSimulator
 
 EXTRA_LOCAL_PHASE_CENTER_LAMD = (1.0, -1.0)
@@ -86,6 +87,7 @@ def sweep_local_region_phase_peaks(
     fov_count: int = 5,
     single_region_ring_radius_lamD: float | None = None,
     single_region_step_diameter_fraction: float = 0.25,
+    ring_rotation_fraction: float = 0.0,
 ) -> dict:
     """
     Sweep local phase applied only in selected regions and track per-region peak intensities.
@@ -113,8 +115,9 @@ def sweep_local_region_phase_peaks(
         raise ValueError("outward_step_lamD must be > 0.")
     if single_region_step_diameter_fraction <= 0.0:
         raise ValueError("single_region_step_diameter_fraction must be > 0.")
-    if str(region_shape).strip().lower() != "circle":
-        raise ValueError("region_shape currently supports only 'circle'.")
+    if float(ring_rotation_fraction) < 0.0 or float(ring_rotation_fraction) > 1.0:
+        raise ValueError("ring_rotation_fraction must be within [0, 1].")
+    region_shape_name = normalize_region_shape(region_shape)
     if int(fov_count) < 1:
         raise ValueError("fov_count must be >= 1.")
     sweep_mode = str(phase_sweep_mode).strip().lower()
@@ -137,6 +140,9 @@ def sweep_local_region_phase_peaks(
         )
 
     manual_mode = region_centers_lamD is not None
+    effective_region_radius_lamD = float(region_radius_lamD)
+    ring_inner_radius_lamD = np.nan
+    ring_outer_radius_lamD = np.nan
     if manual_mode:
         expected_n = int(fov_count)
         if len(region_centers_lamD) != expected_n:
@@ -150,41 +156,68 @@ def sweep_local_region_phase_peaks(
 
         # Keep one detected region unchanged. The other three are moved outward.
         ref = detected[keep_region_index]
-        moved_centers = [(ref["x_lamD"], ref["y_lamD"])]
-        others = [p for i, p in enumerate(detected) if i != keep_region_index]
-        others.sort(key=lambda p: p["r_lamD"])
+        if region_shape_name == "ring_of_circle":
+            ring_r = (
+                float(single_region_ring_radius_lamD)
+                if single_region_ring_radius_lamD is not None
+                else float(ref["r_lamD"])
+            )
+            ring = build_touching_circle_ring(
+                requested_region_radius_lamD=region_radius_lamD,
+                orbit_radius_lamD=ring_r,
+                anchor_angle_rad=float(ref["theta_rad"]),
+                rotation_fraction=float(ring_rotation_fraction),
+            )
+            moved_centers = list(ring["centers_lamD"])
+            effective_region_radius_lamD = float(ring["resolved_radius_lamD"])
+        elif region_shape_name == "ring":
+            ring_r = (
+                float(single_region_ring_radius_lamD)
+                if single_region_ring_radius_lamD is not None
+                else float(ref["r_lamD"])
+            )
+            ring_inner_radius_lamD, ring_outer_radius_lamD = annulus_radii_from_width(
+                mid_radius_lamD=ring_r,
+                width_lamD=effective_region_radius_lamD,
+            )
+            moved_centers = [(ref["x_lamD"], ref["y_lamD"])]
+        else:
+            moved_centers = [(ref["x_lamD"], ref["y_lamD"])]
+            others = [p for i, p in enumerate(detected) if i != keep_region_index]
+            others.sort(key=lambda p: p["r_lamD"])
 
-        # Optional geometry mode: align all moved regions on the kept-region azimuth.
-        ref_theta = ref["theta_rad"]
-        for j, p in enumerate(others, start=1):
-            theta = ref_theta if align_to_reference_azimuth else p["theta_rad"]
-            new_r = max(float(p["r_lamD"]), float(ref["r_lamD"]) + j * outward_step_lamD)
-            moved_centers.append((new_r * np.cos(theta), new_r * np.sin(theta)))
+            # Optional geometry mode: align all moved regions on the kept-region azimuth.
+            ref_theta = ref["theta_rad"]
+            for j, p in enumerate(others, start=1):
+                theta = ref_theta if align_to_reference_azimuth else p["theta_rad"]
+                new_r = max(float(p["r_lamD"]), float(ref["r_lamD"]) + j * outward_step_lamD)
+                moved_centers.append((new_r * np.cos(theta), new_r * np.sin(theta)))
 
-    if not manual_mode:
-        moved_centers.append(EXTRA_LOCAL_PHASE_CENTER_LAMD)
+    if region_shape_name == "circle":
+        if not manual_mode:
+            moved_centers.append(EXTRA_LOCAL_PHASE_CENTER_LAMD)
 
-    # Match requested FOV count.
-    if len(moved_centers) > int(fov_count):
-        moved_centers = moved_centers[: int(fov_count)]
-    elif len(moved_centers) < int(fov_count):
-        x0, y0 = moved_centers[0]
-        start_theta = float(np.arctan2(y0, x0))
-        ring_r = (
-            float(single_region_ring_radius_lamD)
-            if single_region_ring_radius_lamD is not None
-            else float(np.hypot(x0, y0))
-        )
-        if ring_r <= 0.0:
-            raise ValueError("single_region_ring_radius_lamD must be > 0.")
-        step_lamD = float(single_region_step_diameter_fraction) * 2.0 * float(region_radius_lamD)
-        dtheta = step_lamD / ring_r
-        if dtheta <= 0.0:
-            raise ValueError("Computed angular step must be > 0.")
-        extra_needed = int(fov_count) - len(moved_centers)
-        for k in range(extra_needed):
-            th = start_theta + (k + 1) * dtheta
-            moved_centers.append((ring_r * np.cos(th), ring_r * np.sin(th)))
+        # Match requested FOV count.
+        if len(moved_centers) > int(fov_count):
+            moved_centers = moved_centers[: int(fov_count)]
+        elif len(moved_centers) < int(fov_count):
+            x0, y0 = moved_centers[0]
+            start_theta = float(np.arctan2(y0, x0))
+            ring_r = (
+                float(single_region_ring_radius_lamD)
+                if single_region_ring_radius_lamD is not None
+                else float(np.hypot(x0, y0))
+            )
+            if ring_r <= 0.0:
+                raise ValueError("single_region_ring_radius_lamD must be > 0.")
+            step_lamD = float(single_region_step_diameter_fraction) * 2.0 * effective_region_radius_lamD
+            dtheta = step_lamD / ring_r
+            if dtheta <= 0.0:
+                raise ValueError("Computed angular step must be > 0.")
+            extra_needed = int(fov_count) - len(moved_centers)
+            for k in range(extra_needed):
+                th = start_theta + (k + 1) * dtheta
+                moved_centers.append((ring_r * np.cos(th), ring_r * np.sin(th)))
 
     # Build lambda/D coordinate grids for region-based evaluation masks.
     n = int(base["n_fft"])
@@ -193,10 +226,17 @@ def sweep_local_region_phase_peaks(
     x_lamD = (pix - c) / float(base["focal_sampling"])
     y_lamD = (pix - c) / float(base["focal_sampling"])
     xx_lamD, yy_lamD = np.meshgrid(x_lamD, y_lamD)
-    region_masks = [
-        (xx_lamD - xc) ** 2 + (yy_lamD - yc) ** 2 <= region_radius_lamD**2
-        for xc, yc in moved_centers
-    ]
+    if region_shape_name == "ring":
+        rr_lamD = np.sqrt(xx_lamD**2 + yy_lamD**2)
+        region_masks = [
+            (rr_lamD >= float(ring_inner_radius_lamD))
+            & (rr_lamD <= float(ring_outer_radius_lamD))
+        ]
+    else:
+        region_masks = [
+            (xx_lamD - xc) ** 2 + (yy_lamD - yc) ** 2 <= effective_region_radius_lamD**2
+            for xc, yc in moved_centers
+        ]
 
     phase_offsets = np.linspace(float(phase_min_rad), float(phase_max_rad), n_phase_samples)
     region_peak_curves = np.zeros((len(region_masks), n_phase_samples), dtype=float)
@@ -216,8 +256,18 @@ def sweep_local_region_phase_peaks(
         else:
             # Local phase injection at first focal plane.
             phase_kwargs["focal_local_phase_offset"] = float(phase)
-            phase_kwargs["focal_local_phase_centers_lamD"] = tuple(moved_centers)
-            phase_kwargs["focal_local_phase_radius_lamD"] = float(region_radius_lamD)
+            if region_shape_name == "ring":
+                phase_kwargs["focal_local_phase_shape"] = "ring"
+                phase_kwargs["focal_local_phase_centers_lamD"] = ()
+                phase_kwargs["focal_local_phase_radius_lamD"] = 0.0
+                phase_kwargs["focal_local_phase_inner_radius_lamD"] = float(ring_inner_radius_lamD)
+                phase_kwargs["focal_local_phase_outer_radius_lamD"] = float(ring_outer_radius_lamD)
+            else:
+                phase_kwargs["focal_local_phase_shape"] = "circle"
+                phase_kwargs["focal_local_phase_centers_lamD"] = tuple(moved_centers)
+                phase_kwargs["focal_local_phase_radius_lamD"] = float(effective_region_radius_lamD)
+                phase_kwargs["focal_local_phase_inner_radius_lamD"] = 0.0
+                phase_kwargs["focal_local_phase_outer_radius_lamD"] = 0.0
             phase_kwargs["e_final_phase_offset"] = 0.0
             result = CoronagraphSimulator(**phase_kwargs).run()
             i_final = result["final_psf_with_ghost"]
@@ -228,7 +278,8 @@ def sweep_local_region_phase_peaks(
         "phase_offsets_rad": phase_offsets,
         "region_peak_curves": region_peak_curves,
         "region_centers_lamD": np.array(moved_centers, dtype=float),
-        "region_radius_lamD": float(region_radius_lamD),
+        "region_radius_lamD": float(effective_region_radius_lamD),
+        "requested_region_radius_lamD": float(region_radius_lamD),
         "detected_peak_positions_lamD": np.array(
             [[p["x_lamD"], p["y_lamD"]] for p in detected], dtype=float
         ),
@@ -236,7 +287,7 @@ def sweep_local_region_phase_peaks(
         "align_to_reference_azimuth": bool(align_to_reference_azimuth),
         "outward_step_lamD": float(outward_step_lamD),
         "manual_centers_used": bool(manual_mode),
-        "region_shape": str(region_shape).strip().lower(),
+        "region_shape": region_shape_name,
         "fov_count": int(len(moved_centers)),
         "single_region_ring_radius_lamD": (
             float(single_region_ring_radius_lamD)
@@ -244,7 +295,10 @@ def sweep_local_region_phase_peaks(
             else np.nan
         ),
         "single_region_step_diameter_fraction": float(single_region_step_diameter_fraction),
+        "ring_rotation_fraction": float(ring_rotation_fraction),
         "single_region_n_circles": int(len(moved_centers)),
+        "ring_inner_radius_lamD": float(ring_inner_radius_lamD),
+        "ring_outer_radius_lamD": float(ring_outer_radius_lamD),
         "phase_sweep_mode": sweep_mode,
         "phase_application_plane": (
             "first_focal_plane_local_regions" if sweep_mode == "regional" else "global_phase_offset"
