@@ -471,6 +471,7 @@ HTML = """<!doctype html>
     <div class="field"><label id="label_roddier_mask_radius">Roddier Radius <span class="unit">λ/D</span></label><input id="roddier_mask_radius" value="0.53" /></div>
     <div class="field"><label id="label_roddier_mask_phase">Roddier Phase <span class="unit">rad</span></label><input id="roddier_mask_phase" value="3.1415926535" /></div>
     <div class="field"><label id="label_vortex_charge">Vortex Charge</label><input id="vortex_charge" value="2" /></div>
+    <div class="field"><label>Spiders</label><select id="spiders_enabled"><option value="on" selected>on</option><option value="off">off</option></select></div>
     <div class="field"><label>Spider Width <span class="unit">px</span></label><input id="spider_width" value="0.25" /></div>
     <div class="field"><label>Spider Angles <span class="tip" title="Space-separated angles in degrees, e.g. 0 90">?</span></label><input id="spider_angles" value="0 90" /></div>
     <div class="field"><label>Pupil SS <span class="tip" title="Entrance pupil supersampling factor per axis">?</span></label><input id="pupil_ss" value="8" /></div>
@@ -588,7 +589,7 @@ HTML = """<!doctype html>
 
 <script>
 const fields = [
-  "phase_mask_type","roddier_mask_radius","roddier_mask_phase","vortex_charge","spider_width",
+  "phase_mask_type","roddier_mask_radius","roddier_mask_phase","vortex_charge","spiders_enabled","spider_width",
   "spider_angles","pupil_ss","phase_screen_jitter","incoherence_map_mode","phase_sweep_mode","local_region_radius","region_shape","fov_count","fov_centers_count",
   "single_region_ring_radius","enable_ring_of_circle_sweep","enable_ring_rotation_sweep",
   "ring_rotation_fraction","ring_rotation_sweep_max","ring_rotation_sweep_step","phase_step",
@@ -628,6 +629,20 @@ function setMaskVisibility() {
   const vortexIds = ["label_vortex_charge", "vortex_charge"];
   for (const id of roddierIds) document.getElementById(id).style.display = isRoddier ? "" : "none";
   for (const id of vortexIds) document.getElementById(id).style.display = isRoddier ? "none" : "";
+}
+
+function setSpiderVisibility() {
+  const spidersEnabled = document.getElementById("spiders_enabled").value === "on";
+  setFieldDisabled(
+    "spider_width",
+    !spidersEnabled,
+    spidersEnabled ? "" : "Ignored when spiders are off.",
+  );
+  setFieldDisabled(
+    "spider_angles",
+    !spidersEnabled,
+    spidersEnabled ? "" : "Ignored when spiders are off.",
+  );
 }
 
 function updateChoiceButtons() {
@@ -773,8 +788,15 @@ async function tick() {
   statusEl.textContent = j.running ? "Running..." : "Idle";
   statusEl.className = j.running ? "status-running" : "status-idle";
   const log = document.getElementById("log");
-  log.value = j.log || "";
-  log.scrollTop = log.scrollHeight;
+  const nextLog = j.log || "";
+  const scrollBottomGap = log.scrollHeight - log.scrollTop - log.clientHeight;
+  const stickToBottom = scrollBottomGap <= 24;
+  if (log.value !== nextLog) {
+    log.value = nextLog;
+    if (stickToBottom) {
+      log.scrollTop = log.scrollHeight;
+    }
+  }
 
   const roiSweepEnabled = document.getElementById("roi_size_sweep").checked;
   const posRoiSweepEnabled = document.getElementById("planet_position_roi_size_sweep").checked;
@@ -835,10 +857,12 @@ async function tick() {
   if (diagRoiSweepEnabled) diagRoiFields.classList.remove("is-hidden");
   else diagRoiFields.classList.add("is-hidden");
   setMaskVisibility();
+  setSpiderVisibility();
   updateChoiceButtons();
 }
 setInterval(tick, 500);
 document.getElementById("phase_mask_type").addEventListener("change", setMaskVisibility);
+document.getElementById("spiders_enabled").addEventListener("change", tick);
 document.getElementById("roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("roi_size_sweep"); tick(); });
 document.getElementById("planet_position_roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_position_roi_size_sweep"); tick(); });
 document.getElementById("planet_diagonal_roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_diagonal_roi_size_sweep"); tick(); });
@@ -938,6 +962,9 @@ class Runner:
             ):
                 value = "0.0"
             cmd.extend([flag, str(value).strip()])
+
+        if str(payload.get("spiders_enabled", "on")).strip().lower() == "off":
+            cmd.append("--disable-spiders");
 
         planet_radius = float(str(payload.get("planet_offset_radius_local", "0.0")).strip() or "0.0")
         planet_theta_deg = float(str(payload.get("planet_offset_theta_deg_local", "0.0")).strip() or "0.0")

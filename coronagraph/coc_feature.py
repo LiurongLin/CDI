@@ -8,13 +8,20 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .plotting import _coc_build_incoherence_maps, plot_coc_planet_phase_outputs
+from .plotting import (
+    _coc_build_incoherence_maps,
+    _coc_frequency_selection_spectrum,
+    plot_coc_planet_phase_outputs,
+)
 from .region_shapes import (
     annulus_radii_from_width,
     build_touching_circle_ring,
     normalize_region_shape,
 )
 from .simulator import CoronagraphSimulator
+
+SNR_APERTURE_RADIUS_LAMD = 1.0
+SNR_ANNULUS_HALF_WIDTH_LAMD = 1.0
 
 
 def _theta_back_and_forth(n: int, max_abs: float = np.pi) -> np.ndarray:
@@ -65,6 +72,7 @@ def _local_phase_region_kwargs(
     region_width_or_radius_lamD: float,
     orbit_radius_lamD: float,
     centers_lamD: list[tuple[float, float]],
+    ring_center_lamD: tuple[float, float] = (0.0, 0.0),
 ) -> dict:
     if region_shape_name == "ring":
         inner_radius_lamD, outer_radius_lamD = annulus_radii_from_width(
@@ -75,6 +83,10 @@ def _local_phase_region_kwargs(
             "focal_local_phase_shape": "ring",
             "focal_local_phase_centers_lamD": (),
             "focal_local_phase_radius_lamD": 0.0,
+            "focal_local_phase_ring_center_lamD": (
+                float(ring_center_lamD[0]),
+                float(ring_center_lamD[1]),
+            ),
             "focal_local_phase_inner_radius_lamD": float(inner_radius_lamD),
             "focal_local_phase_outer_radius_lamD": float(outer_radius_lamD),
         }
@@ -82,6 +94,7 @@ def _local_phase_region_kwargs(
         "focal_local_phase_shape": "circle",
         "focal_local_phase_centers_lamD": tuple((float(cx), float(cy)) for cx, cy in centers_lamD),
         "focal_local_phase_radius_lamD": float(region_width_or_radius_lamD),
+        "focal_local_phase_ring_center_lamD": (0.0, 0.0),
         "focal_local_phase_inner_radius_lamD": 0.0,
         "focal_local_phase_outer_radius_lamD": 0.0,
     }
@@ -106,6 +119,29 @@ def _polar_to_cartesian_lamD(radius_lamD: float, theta_deg: float) -> tuple[floa
     return (
         float(radius * np.cos(theta_rad)),
         float(radius * np.sin(theta_rad)),
+    )
+
+
+def _phase_screen_folder_tag(args: argparse.Namespace, sim_kwargs: dict) -> str:
+    jitter_choice = getattr(args, "phase_screen_jitter", None)
+    if jitter_choice is not None:
+        token = str(jitter_choice).strip().lower()
+        if token in {"", "none"}:
+            return "_phase_screen_off"
+        return f"_phase_screen_on_{token}"
+    if sim_kwargs.get("phase_screen_path") is None:
+        return "_phase_screen_off"
+    return "_phase_screen_on"
+
+
+def _focal_shift_lamD(sim_kwargs: dict) -> tuple[float, float]:
+    focal_shift_pixels = tuple(float(v) for v in sim_kwargs.get("focal_shift_pixels", (0.0, 0.0)))
+    focal_sampling = float(sim_kwargs.get("focal_sampling", 1.0))
+    if np.isclose(focal_sampling, 0.0):
+        return (0.0, 0.0)
+    return (
+        float(focal_shift_pixels[0] / focal_sampling),
+        float(focal_shift_pixels[1] / focal_sampling),
     )
 
 
@@ -138,6 +174,8 @@ def _compute_incoherence_map_info(
     )
     return {
         **map_info,
+        "analysis_stack": np.asarray(stack_arr, dtype=float),
+        "analysis_phase_series": np.asarray(phase_series, dtype=float),
         "freq_bins": np.asarray(freq, dtype=float),
     }
 
@@ -165,8 +203,8 @@ def _planet_region_snr(
     yy: np.ndarray,
     planet_center_lamD: tuple[float, float],
     orbit_radius_lamD: float,
-    eval_radius_lamD: float = 0.5,
-    annulus_half_width_lamD: float = 0.5,
+    eval_radius_lamD: float = SNR_APERTURE_RADIUS_LAMD,
+    annulus_half_width_lamD: float = SNR_ANNULUS_HALF_WIDTH_LAMD,
     snr_eps: float = 1e-12,
 ) -> tuple[float, float, float]:
     noise_centers = _noise_aperture_centers_lamD(
@@ -177,49 +215,169 @@ def _planet_region_snr(
     )
     eval_radius = float(eval_radius_lamD)
     orbit_radius = float(orbit_radius_lamD)
-    annulus_half_width = float(annulus_half_width_lamD)
     planet_x = float(planet_center_lamD[0])
     planet_y = float(planet_center_lamD[1])
 
-    planet_mask = (
-        (xx - planet_x) ** 2
-        + (yy - planet_y) ** 2
-        <= eval_radius ** 2
-    )
-    signal_sum = float(np.sum(incoh[planet_mask])) if np.any(planet_mask) else float("nan")
+    planet_mask = ((xx - planet_x) ** 2 + (yy - planet_y) ** 2) <= eval_radius ** 2
+    signal_mean = float(np.mean(incoh[planet_mask])) if np.any(planet_mask) else float("nan")
 
     rr = np.sqrt(xx**2 + yy**2)
-    annulus_mask = (rr >= (orbit_radius - annulus_half_width)) & (
-        rr <= (orbit_radius + annulus_half_width)
-    )
-
-    aperture_sums: list[float] = []
+    annulus_mask = (rr >= (orbit_radius - eval_radius)) & (rr <= (orbit_radius + eval_radius))
+    aperture_means: list[float] = []
     for cx, cy in noise_centers:
         aperture_mask = ((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2) <= eval_radius ** 2
         if not np.any(aperture_mask):
             continue
         if not np.all(annulus_mask[aperture_mask]):
             continue
-        aperture_sums.append(float(np.sum(incoh[aperture_mask])))
+        aperture_means.append(float(np.mean(incoh[aperture_mask])))
+    background_mean = (
+        float(np.mean(np.asarray(aperture_means, dtype=float)))
+        if len(aperture_means) > 0
+        else float("nan")
+    )
+    background_std = float(np.std(np.asarray(aperture_means, dtype=float))) if len(aperture_means) > 0 else float("nan")
 
-    noise_std = float(np.std(np.asarray(aperture_sums, dtype=float))) if len(aperture_sums) > 0 else float("nan")
-    if np.isfinite(signal_sum) and np.isfinite(noise_std):
+    if np.isfinite(signal_mean) and np.isfinite(background_mean) and np.isfinite(background_std):
+        noise_term = float(background_std)
+        noise_safe = (
+            noise_term
+            if abs(noise_term) > float(snr_eps)
+            else (float(snr_eps) if noise_term >= 0.0 else -float(snr_eps))
+        )
+        snr = float((signal_mean - background_mean) / noise_safe)
+    else:
+        snr = float("nan")
+    return signal_mean, background_std, snr
+
+
+def _planet_region_centered_snr(
+    incoh: np.ndarray,
+    xx: np.ndarray,
+    yy: np.ndarray,
+    planet_center_lamD: tuple[float, float],
+    orbit_radius_lamD: float,
+    eval_radius_lamD: float = SNR_APERTURE_RADIUS_LAMD,
+    annulus_half_width_lamD: float = SNR_ANNULUS_HALF_WIDTH_LAMD,
+    snr_eps: float = 1e-12,
+) -> tuple[float, float, float, float]:
+    noise_centers = _noise_aperture_centers_lamD(
+        planet_center_lamD=planet_center_lamD,
+        orbit_radius_lamD=orbit_radius_lamD,
+        eval_radius_lamD=eval_radius_lamD,
+        annulus_half_width_lamD=annulus_half_width_lamD,
+    )
+    eval_radius = float(eval_radius_lamD)
+    orbit_radius = float(orbit_radius_lamD)
+    planet_x = float(planet_center_lamD[0])
+    planet_y = float(planet_center_lamD[1])
+
+    planet_mask = ((xx - planet_x) ** 2 + (yy - planet_y) ** 2) <= eval_radius ** 2
+    signal_mean = float(np.mean(incoh[planet_mask])) if np.any(planet_mask) else float("nan")
+
+    rr = np.sqrt(xx**2 + yy**2)
+    annulus_mask = (rr >= (orbit_radius - eval_radius)) & (rr <= (orbit_radius + eval_radius))
+    background_aperture_means: list[float] = []
+    for cx, cy in noise_centers:
+        aperture_mask = ((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2) <= eval_radius ** 2
+        if not np.any(aperture_mask):
+            continue
+        if not np.all(annulus_mask[aperture_mask]):
+            continue
+        background_aperture_means.append(float(np.mean(incoh[aperture_mask])))
+    background_mean = (
+        float(np.mean(np.asarray(background_aperture_means, dtype=float)))
+        if len(background_aperture_means) > 0
+        else float("nan")
+    )
+    background_std = (
+        float(np.std(np.asarray(background_aperture_means, dtype=float)))
+        if len(background_aperture_means) > 0
+        else float("nan")
+    )
+
+    if np.isfinite(signal_mean) and np.isfinite(background_std):
+        noise_term = float(background_std)
+        noise_safe = (
+            noise_term
+            if abs(noise_term) > float(snr_eps)
+            else (float(snr_eps) if noise_term >= 0.0 else -float(snr_eps))
+        )
+        snr = float((signal_mean - background_mean) / noise_safe)
+    else:
+        snr = float("nan")
+    return signal_mean, background_mean, background_std, snr
+
+
+def _planet_region_snr_from_coherence(
+    coherence_map: np.ndarray,
+    xx: np.ndarray,
+    yy: np.ndarray,
+    planet_center_lamD: tuple[float, float],
+    orbit_radius_lamD: float,
+    eval_radius_lamD: float = SNR_APERTURE_RADIUS_LAMD,
+    annulus_half_width_lamD: float = SNR_ANNULUS_HALF_WIDTH_LAMD,
+    snr_eps: float = 1e-12,
+) -> tuple[float, float, float]:
+    noise_centers = _noise_aperture_centers_lamD(
+        planet_center_lamD=planet_center_lamD,
+        orbit_radius_lamD=orbit_radius_lamD,
+        eval_radius_lamD=eval_radius_lamD,
+        annulus_half_width_lamD=annulus_half_width_lamD,
+    )
+    coh_arr = np.asarray(coherence_map, dtype=float)
+    xx_arr = np.asarray(xx, dtype=float)
+    yy_arr = np.asarray(yy, dtype=float)
+    eval_radius = float(eval_radius_lamD)
+    orbit_radius = float(orbit_radius_lamD)
+    annulus_half_width = float(annulus_half_width_lamD)
+    planet_x = float(planet_center_lamD[0])
+    planet_y = float(planet_center_lamD[1])
+
+    planet_mask = ((xx_arr - planet_x) ** 2 + (yy_arr - planet_y) ** 2) <= eval_radius ** 2
+    planet_stat = float(np.mean(coh_arr[planet_mask])) if np.any(planet_mask) else float("nan")
+
+    rr = np.sqrt(xx_arr**2 + yy_arr**2)
+    annulus_mask = (rr >= (orbit_radius - annulus_half_width)) & (
+        rr <= (orbit_radius + annulus_half_width)
+    )
+
+    aperture_stats: list[float] = []
+    for cx, cy in noise_centers:
+        aperture_mask = ((xx_arr - float(cx)) ** 2 + (yy_arr - float(cy)) ** 2) <= eval_radius ** 2
+        if not np.any(aperture_mask):
+            continue
+        if not np.all(annulus_mask[aperture_mask]):
+            continue
+        aperture_stats.append(float(np.mean(coh_arr[aperture_mask])))
+
+    background_mean = (
+        float(np.mean(np.asarray(aperture_stats, dtype=float)))
+        if len(aperture_stats) > 0
+        else float("nan")
+    )
+    noise_std = (
+        float(np.std(np.asarray(aperture_stats, dtype=float)))
+        if len(aperture_stats) > 0
+        else float("nan")
+    )
+    if np.isfinite(planet_stat) and np.isfinite(background_mean) and np.isfinite(noise_std):
         noise_safe = (
             noise_std
             if abs(noise_std) > float(snr_eps)
             else (float(snr_eps) if noise_std >= 0.0 else -float(snr_eps))
         )
-        snr = float(signal_sum / noise_safe)
+        snr = float((background_mean - planet_stat) / noise_safe)
     else:
         snr = float("nan")
-    return signal_sum, noise_std, snr
+    return planet_stat, background_mean, snr
 
 
 def _noise_aperture_centers_lamD(
     planet_center_lamD: tuple[float, float],
     orbit_radius_lamD: float,
-    eval_radius_lamD: float = 0.5,
-    annulus_half_width_lamD: float = 0.5,
+    eval_radius_lamD: float = SNR_APERTURE_RADIUS_LAMD,
+    annulus_half_width_lamD: float = SNR_ANNULUS_HALF_WIDTH_LAMD,
 ) -> list[tuple[float, float]]:
     eval_radius = float(eval_radius_lamD)
     orbit_radius = float(orbit_radius_lamD)
@@ -227,24 +385,34 @@ def _noise_aperture_centers_lamD(
     if eval_radius <= 0.0 or orbit_radius <= 0.0 or annulus_half_width < eval_radius:
         return []
 
-    planet_x = float(planet_center_lamD[0])
-    planet_y = float(planet_center_lamD[1])
-    anchor_angle = float(np.arctan2(planet_y, planet_x))
+    anchor_angle = 0.0
     ring = build_touching_circle_ring(
         requested_region_radius_lamD=eval_radius,
         orbit_radius_lamD=orbit_radius,
         anchor_angle_rad=anchor_angle,
         rotation_fraction=0.0,
     )
+    return [(float(cx), float(cy)) for cx, cy in ring["centers_lamD"]]
 
-    noise_centers: list[tuple[float, float]] = []
-    for cx, cy in ring["centers_lamD"]:
-        cx_f = float(cx)
-        cy_f = float(cy)
-        if np.hypot(cx_f - planet_x, cy_f - planet_y) < 1e-12:
-            continue
-        noise_centers.append((cx_f, cy_f))
-    return noise_centers
+
+def _select_reference_speckle_centers_lamD(
+    planet_center_lamD: tuple[float, float],
+    orbit_radius_lamD: float,
+    n_select: int = 3,
+    eval_radius_lamD: float = SNR_APERTURE_RADIUS_LAMD,
+    annulus_half_width_lamD: float = SNR_ANNULUS_HALF_WIDTH_LAMD,
+) -> list[tuple[float, float]]:
+    noise_centers = _noise_aperture_centers_lamD(
+        planet_center_lamD=planet_center_lamD,
+        orbit_radius_lamD=orbit_radius_lamD,
+        eval_radius_lamD=eval_radius_lamD,
+        annulus_half_width_lamD=annulus_half_width_lamD,
+    )
+    if len(noise_centers) <= n_select:
+        return noise_centers
+    idx = np.linspace(0, len(noise_centers) - 1, int(n_select), dtype=int)
+    idx = np.unique(idx)
+    return [noise_centers[int(i)] for i in idx]
 
 
 def _resolve_roi_configuration(
@@ -309,6 +477,7 @@ def _evaluate_best_roi_for_planet_center(
                         region_width_or_radius_lamD=float(roi_radius_eff),
                         orbit_radius_lamD=orbit_radius_lamD,
                         centers_lamD=roi_centers,
+                        ring_center_lamD=_focal_shift_lamD(sim_local),
                     ),
                 }
             )
@@ -317,12 +486,31 @@ def _evaluate_best_roi_for_planet_center(
             stack=stack,
             phase_offsets=phase_offsets,
             mode=str(incoherence_map_mode),
-            planet_region_mask=((xx16 - float(planet_center[0])) ** 2 + (yy16 - float(planet_center[1])) ** 2 <= 0.5 ** 2),
+            planet_region_mask=(
+                (xx16 - float(planet_center[0])) ** 2
+                + (yy16 - float(planet_center[1])) ** 2
+                <= SNR_APERTURE_RADIUS_LAMD ** 2
+            ),
         )
         if map_info is None:
             continue
         incoh = np.asarray(map_info["incoherence_map"], dtype=float)
+        coherence_map = np.asarray(map_info["coherence_map"], dtype=float)
+        max_minus_coherence_map = np.nanmax(coherence_map) - coherence_map
+        planet_mask = (
+            (xx16 - float(planet_center[0])) ** 2
+            + (yy16 - float(planet_center[1])) ** 2
+            <= SNR_APERTURE_RADIUS_LAMD ** 2
+        )
+        planet_std = float(np.std(np.asarray(incoh[planet_mask], dtype=float))) if np.any(planet_mask) else float("nan")
         peak, med, snr = _planet_region_snr(
+            incoh=incoh,
+            xx=xx16,
+            yy=yy16,
+            planet_center_lamD=planet_center,
+            orbit_radius_lamD=orbit_radius_lamD,
+        )
+        centered_peak, centered_comparison_mean, centered_comparison_std, centered_snr = _planet_region_centered_snr(
             incoh=incoh,
             xx=xx16,
             yy=yy16,
@@ -338,8 +526,12 @@ def _evaluate_best_roi_for_planet_center(
             "resolved_roi_size_lamD": float(roi_radius_eff),
             "n_circles": int(len(roi_centers)),
             "planet_peak": float(peak),
-            "annulus_median": float(med),
-            "snr": float(snr),
+            "planet_std": float(planet_std),
+            "background_aperture_std": float(med),
+            "raw_snr": float(snr),
+            "background_aperture_mean": float(centered_comparison_mean),
+            "background_aperture_std_centered": float(centered_comparison_std),
+            "snr": float(centered_snr),
         }
         rows.append(row)
         if best_entry is None or (
@@ -348,24 +540,70 @@ def _evaluate_best_roi_for_planet_center(
         ):
             best_entry = row
         if collect_panels:
+            reference_spectra: list[dict[str, object]] = []
+            freq_bins = np.asarray(map_info.get("freq_bins", np.array([], dtype=float)), dtype=float)
+            analysis_stack = np.asarray(
+                map_info.get("analysis_stack", np.array([], dtype=float)),
+                dtype=float,
+            )
+            if freq_bins.size > 0 and analysis_stack.ndim == 3 and analysis_stack.shape[0] >= 2:
+                for iref, (ref_x, ref_y) in enumerate(
+                    _select_reference_speckle_centers_lamD(
+                        planet_center_lamD=planet_center,
+                        orbit_radius_lamD=orbit_radius_lamD,
+                    ),
+                    start=1,
+                ):
+                    ref_mask = (
+                        (xx16 - float(ref_x)) ** 2
+                        + (yy16 - float(ref_y)) ** 2
+                        <= SNR_APERTURE_RADIUS_LAMD ** 2
+                    )
+                    spec = _coc_frequency_selection_spectrum(
+                        freq_bins=freq_bins,
+                        central_stack_fft=analysis_stack,
+                        planet_region_mask=ref_mask,
+                    )
+                    reference_spectra.append(
+                        {
+                            "label": f"Speckle {iref}",
+                            "center_lamD": (float(ref_x), float(ref_y)),
+                            "nonnegative_freqs": np.asarray(
+                                spec.get("nonnegative_freqs", np.array([], dtype=float)),
+                                dtype=float,
+                            ),
+                            "nonnegative_mag": np.asarray(
+                                spec.get("nonnegative_mag", np.array([], dtype=float)),
+                                dtype=float,
+                            ),
+                        }
+                    )
             panels.append(
                 {
                     "requested_roi_size_lamD": float(roi_size),
                     "resolved_roi_size_lamD": float(roi_radius_eff),
                     "n_circles": int(len(roi_centers)),
                     "planet_peak": float(peak),
-                    "annulus_median": float(med),
-                    "snr": float(snr),
+                    "planet_std": float(planet_std),
+                    "background_aperture_std": float(med),
+                    "raw_snr": float(snr),
+                    "background_aperture_mean": float(centered_comparison_mean),
+                    "background_aperture_std_centered": float(centered_comparison_std),
+                    "snr": float(centered_snr),
+                    "planet_peak_centered_snr": float(centered_peak),
                     "orbit_radius_lamD": float(orbit_radius_lamD),
                     "planet_center_lamD": (float(planet_center[0]), float(planet_center[1])),
                     "roi_centers_lamD": [(float(cx), float(cy)) for cx, cy in roi_centers],
-                    "map": np.array(incoh, dtype=float),
+                    "incoherence_map": np.array(incoh, dtype=float),
+                    "coherence_map": coherence_map,
+                    "max_minus_coherence_map": max_minus_coherence_map,
                     "incoherence_map_mode": str(incoherence_map_mode),
                     "selected_target_freq": float(map_info["selected_target_freq"]),
                     "selection_nonnegative_freqs": np.asarray(map_info.get("selection_nonnegative_freqs", np.array([], dtype=float)), dtype=float),
                     "selection_nonnegative_mag": np.asarray(map_info.get("selection_nonnegative_mag", np.array([], dtype=float)), dtype=float),
                     "selection_positive_freqs": np.asarray(map_info.get("selection_positive_freqs", np.array([], dtype=float)), dtype=float),
                     "selection_positive_mag": np.asarray(map_info.get("selection_positive_mag", np.array([], dtype=float)), dtype=float),
+                    "reference_spectra": reference_spectra,
                 }
             )
     return rows, best_entry, panels
@@ -378,12 +616,114 @@ def _save_roi_size_incoherence_pdf_for_planet_location(
     panels: list[dict[str, object]],
     extent: list[float],
 ) -> None:
+    _save_roi_size_map_pdf_for_planet_location(
+        output_path=output_path,
+        region_shape_name=region_shape_name,
+        panels=panels,
+        extent=extent,
+        map_key="incoherence_map",
+        title_prefix="Incoherence",
+        cmap="viridis",
+        snr_key="snr",
+        snr_label="SNR",
+        curve_snr_key="snr",
+        curve_snr_label="SNR",
+        vmax_percentile=90.0,
+        include_mean_map_page=True,
+    )
+
+
+def _save_roi_size_coherence_pdf_for_planet_location(
+    *,
+    output_path: str,
+    region_shape_name: str,
+    panels: list[dict[str, object]],
+    extent: list[float],
+) -> None:
+    _save_roi_size_map_pdf_for_planet_location(
+        output_path=output_path,
+        region_shape_name=region_shape_name,
+        panels=panels,
+        extent=extent,
+        map_key="coherence_map",
+        title_prefix="Coherence",
+        cmap="viridis",
+        snr_key="snr",
+        snr_label="SNR",
+        curve_snr_key="snr",
+        curve_snr_label="SNR",
+        vmax_percentile=98.0,
+    )
+
+
+def _save_roi_size_max_minus_coherence_pdf_for_planet_location(
+    *,
+    output_path: str,
+    region_shape_name: str,
+    panels: list[dict[str, object]],
+    extent: list[float],
+) -> None:
+    _save_roi_size_map_pdf_for_planet_location(
+        output_path=output_path,
+        region_shape_name=region_shape_name,
+        panels=panels,
+        extent=extent,
+        map_key="max_minus_coherence_map",
+        title_prefix="max(Coherence) - Coherence",
+        cmap="viridis",
+        snr_key="snr",
+        snr_label="SNR",
+        curve_snr_key="snr",
+        curve_snr_label="SNR",
+        vmax_percentile=99.0,
+    )
+
+
+def _save_roi_size_map_pdf_for_planet_location(
+    *,
+    output_path: str,
+    region_shape_name: str,
+    panels: list[dict[str, object]],
+    extent: list[float],
+    map_key: str,
+    title_prefix: str,
+    cmap: str = "viridis",
+    snr_key: str | None = None,
+    snr_label: str | None = None,
+    curve_snr_key: str = "snr",
+    curve_snr_label: str = "SNR",
+    vmin_percentile: float | None = None,
+    vmax_percentile: float = 98.0,
+    include_mean_map_page: bool = False,
+) -> None:
     from matplotlib.backends.backend_pdf import PdfPages
 
     if len(panels) == 0:
         return
 
     panels_sorted = sorted(panels, key=lambda p: float(p["requested_roi_size_lamD"]))
+    curve_snr_keys = (
+        "snr",
+    )
+    curve_snr_all = np.asarray(
+        [
+            float(panel[key])
+            for panel in panels_sorted
+            for key in curve_snr_keys
+            if key in panel and np.isfinite(float(panel[key]))
+        ],
+        dtype=float,
+    )
+    if curve_snr_all.size > 0:
+        curve_snr_ymin = float(np.min(curve_snr_all))
+        curve_snr_ymax = float(np.max(curve_snr_all))
+        if curve_snr_ymax <= curve_snr_ymin:
+            pad = max(abs(curve_snr_ymax) * 0.05, 1e-6)
+        else:
+            pad = 0.05 * (curve_snr_ymax - curve_snr_ymin)
+        curve_snr_ylim = (curve_snr_ymin - pad, curve_snr_ymax + pad)
+    else:
+        curve_snr_ylim = None
     n_panels = len(panels_sorted)
     ncols = min(4, max(2, int(np.ceil(np.sqrt(n_panels)))))
     nrows_maps = int(np.ceil(float(n_panels) / float(ncols)))
@@ -398,30 +738,45 @@ def _save_roi_size_incoherence_pdf_for_planet_location(
 
         for idx, panel in enumerate(panels_sorted):
             ax = fig.add_subplot(gs[idx // ncols, idx % ncols])
-            incoh = np.asarray(panel["map"], dtype=float)
-            finite_vals = incoh[np.isfinite(incoh)]
-            vmax = float(np.percentile(finite_vals, 98.0)) if finite_vals.size > 0 else 1.0
+            map_arr = np.asarray(panel[map_key], dtype=float)
+            finite_vals = map_arr[np.isfinite(map_arr)]
+            if finite_vals.size > 0:
+                vmax = float(np.percentile(finite_vals, float(vmax_percentile)))
+                if vmin_percentile is None:
+                    vmin = 0.0
+                else:
+                    vmin = float(np.percentile(finite_vals, float(vmin_percentile)))
+            else:
+                vmin = 0.0
+                vmax = 1.0
             vmax = max(vmax, 1e-20)
+            if vmax <= vmin:
+                vmax = vmin + 1e-20
             im = ax.imshow(
-                incoh,
+                map_arr,
                 origin="lower",
-                cmap="viridis",
+                cmap=cmap,
                 extent=extent,
-                vmin=0.0,
+                vmin=vmin,
                 vmax=vmax,
             )
             planet_center = panel["planet_center_lamD"]
             orbit_radius_lamD = float(panel["orbit_radius_lamD"])
             roi_centers = panel["roi_centers_lamD"]
             roi_size = float(panel["resolved_roi_size_lamD"])
-            ax.add_patch(
-                plt.Circle(
-                    (float(planet_center[0]), float(planet_center[1])),
-                    0.5,
-                    fill=False,
-                    edgecolor="white",
-                    linewidth=0.3,
-                )
+            planet_x = float(planet_center[0])
+            planet_y = float(planet_center[1])
+            x_text = extent[1] - 0.8 if planet_x >= 0.0 else extent[0] + 0.8
+            x_align = "right" if planet_x >= 0.0 else "left"
+            ax.annotate(
+                "Planet",
+                xy=(planet_x, planet_y),
+                xytext=(x_text, planet_y + 0.9),
+                color="white",
+                fontsize=8,
+                ha=x_align,
+                va="bottom",
+                arrowprops=dict(arrowstyle="->", color="white", lw=1.0),
             )
             if region_shape_name == "ring":
                 ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
@@ -434,29 +789,34 @@ def _save_roi_size_incoherence_pdf_for_planet_location(
                 for j, (cx, cy) in enumerate(roi_centers):
                     edge = "lime" if j == 0 else "cyan"
                     ax.add_patch(plt.Circle((float(cx), float(cy)), roi_size, fill=False, edgecolor=edge, linewidth=1.4))
-            ax.set_title(
-                "ROI {:.2f} -> {:.2f} | SNR {:.3e}".format(
-                    float(panel["requested_roi_size_lamD"]),
-                    roi_size,
-                    float(panel["snr"]),
+            if snr_key is not None and snr_label is not None and snr_key in panel:
+                title_text = (
+                    f"{title_prefix} | ROI {float(panel['requested_roi_size_lamD']):.2f} -> {roi_size:.2f}\n"
+                    f"{str(snr_label)} {float(panel[snr_key]):.3e}"
                 )
-            )
+            else:
+                title_text = (
+                    f"{title_prefix} | ROI {float(panel['requested_roi_size_lamD']):.2f} -> {roi_size:.2f}"
+                )
+            ax.set_title(title_text, fontsize=8, pad=6)
             ax.set_xlabel("x [λ/D]")
             ax.set_ylabel("y [λ/D]")
         for idx in range(n_panels, nrows_maps * ncols):
             ax_unused = fig.add_subplot(gs[idx // ncols, idx % ncols])
             ax_unused.axis("off")
 
-        bottom_gs = gs[nrows_maps, :].subgridspec(1, 2, width_ratios=[1.4, 1.0])
+        bottom_gs = gs[nrows_maps, :].subgridspec(1, 1)
         ax_curve = fig.add_subplot(bottom_gs[0, 0])
         requested_roi = np.asarray([float(panel["requested_roi_size_lamD"]) for panel in panels_sorted], dtype=float)
         resolved_roi = np.asarray([float(panel["resolved_roi_size_lamD"]) for panel in panels_sorted], dtype=float)
-        snr_vals = np.asarray([float(panel["snr"]) for panel in panels_sorted], dtype=float)
-        ax_curve.plot(requested_roi, snr_vals, "-o", lw=1.8, ms=4.8, color="tab:blue", label="SNR")
+        snr_vals = np.asarray([float(panel[curve_snr_key]) for panel in panels_sorted], dtype=float)
+        ax_curve.plot(requested_roi, snr_vals, "-o", lw=1.8, ms=4.8, color="tab:blue", label=str(curve_snr_label))
         ax_curve.set_xlabel("requested ROI size [λ/D]")
-        ax_curve.set_ylabel("SNR", color="tab:blue")
+        ax_curve.set_ylabel(str(curve_snr_label), color="tab:blue")
         ax_curve.tick_params(axis="y", labelcolor="tab:blue")
         ax_curve.grid(alpha=0.3)
+        if curve_snr_ylim is not None:
+            ax_curve.set_ylim(*curve_snr_ylim)
         if np.any(np.abs(resolved_roi - requested_roi) > 1e-12):
             ax_resolved = ax_curve.twinx()
             ax_resolved.plot(requested_roi, resolved_roi, "--s", lw=1.4, ms=4.0, color="tab:orange", label="Resolved ROI")
@@ -472,18 +832,74 @@ def _save_roi_size_incoherence_pdf_for_planet_location(
         title_bits.append(
             f"xy=({float(first_panel['planet_center_lamD'][0]):+.3f}, {float(first_panel['planet_center_lamD'][1]):+.3f})"
         )
-        ax_curve.set_title("SNR vs ROI size | " + " | ".join(title_bits))
-
-        ax_freq = fig.add_subplot(bottom_gs[0, 1])
-        freq_vals = np.asarray([float(panel.get("selected_target_freq", float("nan"))) for panel in panels_sorted], dtype=float)
-        ax_freq.plot(requested_roi, freq_vals, "-o", lw=1.8, ms=4.8, color="tab:purple")
-        ax_freq.set_xlabel("requested ROI size [λ/D]")
-        ax_freq.set_ylabel("selected frequency [1/rad]")
-        ax_freq.set_title("Frequency Used for Incoherence Map")
-        ax_freq.grid(alpha=0.3)
+        ax_curve.set_title(f"{curve_snr_label} vs ROI size | " + " | ".join(title_bits))
 
         pdf.savefig(fig)
         plt.close(fig)
+
+        if include_mean_map_page:
+            mean_stack = np.stack(
+                [np.asarray(panel[map_key], dtype=float) for panel in panels_sorted],
+                axis=0,
+            )
+            mean_map = np.mean(mean_stack, axis=0)
+            finite_vals = mean_map[np.isfinite(mean_map)]
+            if finite_vals.size > 0:
+                mean_vmax = float(np.percentile(finite_vals, float(vmax_percentile)))
+                if vmin_percentile is None:
+                    mean_vmin = 0.0
+                else:
+                    mean_vmin = float(np.percentile(finite_vals, float(vmin_percentile)))
+            else:
+                mean_vmin = 0.0
+                mean_vmax = 1.0
+            mean_vmax = max(mean_vmax, 1e-20)
+            if mean_vmax <= mean_vmin:
+                mean_vmax = mean_vmin + 1e-20
+
+            fig_mean, ax_mean = plt.subplots(1, 1, figsize=(8.0, 7.2), constrained_layout=True)
+            im_mean = ax_mean.imshow(
+                mean_map,
+                origin="lower",
+                cmap=cmap,
+                extent=extent,
+                vmin=mean_vmin,
+                vmax=mean_vmax,
+            )
+            fig_mean.colorbar(im_mean, ax=ax_mean, fraction=0.046, pad=0.04)
+            first_panel = panels_sorted[0]
+            planet_center = first_panel["planet_center_lamD"]
+            planet_x = float(planet_center[0])
+            planet_y = float(planet_center[1])
+            x_text = extent[1] - 0.8 if planet_x >= 0.0 else extent[0] + 0.8
+            x_align = "right" if planet_x >= 0.0 else "left"
+            ax_mean.annotate(
+                "Planet",
+                xy=(planet_x, planet_y),
+                xytext=(x_text, planet_y + 0.9),
+                color="white",
+                fontsize=9,
+                ha=x_align,
+                va="bottom",
+                arrowprops=dict(arrowstyle="->", color="white", lw=1.1),
+            )
+            requested_roi = np.asarray(
+                [float(panel["requested_roi_size_lamD"]) for panel in panels_sorted],
+                dtype=float,
+            )
+            title_lines = [
+                f"Mean {title_prefix.lower()} map across ROI sizes",
+                "ROI {:.2f} to {:.2f} λ/D ({:d} maps)".format(
+                    float(np.min(requested_roi)),
+                    float(np.max(requested_roi)),
+                    int(requested_roi.size),
+                ),
+            ]
+            ax_mean.set_title("\n".join(title_lines), fontsize=10, pad=8)
+            ax_mean.set_xlabel("x [λ/D]")
+            ax_mean.set_ylabel("y [λ/D]")
+            pdf.savefig(fig_mean)
+            plt.close(fig_mean)
 
 
 def _save_roi_size_fft_spectra_pdf_for_planet_location(
@@ -505,7 +921,26 @@ def _save_roi_size_fft_spectra_pdf_for_planet_location(
                 continue
 
             fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2), constrained_layout=True)
-            ax.plot(spec_freq, spec_mag, color="tab:orange", lw=1.8)
+            ax.plot(spec_freq, spec_mag, color="tab:orange", lw=2.0, label="Planet aperture")
+            ref_spectra = list(panel.get("reference_spectra", []))
+            ref_colors = plt.cm.Blues(np.linspace(0.45, 0.85, max(len(ref_spectra), 1)))
+            for color, ref_spec in zip(ref_colors, ref_spectra):
+                ref_freq = np.asarray(ref_spec.get("nonnegative_freqs", np.array([], dtype=float)), dtype=float)
+                ref_mag = np.asarray(ref_spec.get("nonnegative_mag", np.array([], dtype=float)), dtype=float)
+                if ref_freq.size == 0 or ref_mag.size == 0:
+                    continue
+                center = ref_spec.get("center_lamD", (float("nan"), float("nan")))
+                ax.plot(
+                    ref_freq,
+                    ref_mag,
+                    color=color,
+                    lw=1.2,
+                    alpha=0.95,
+                    label=(
+                        f"{ref_spec.get('label', 'Speckle')} "
+                        f"({float(center[0]):+.2f}, {float(center[1]):+.2f})"
+                    ),
+                )
             ax.axvline(float(panel["selected_target_freq"]), color="crimson", lw=1.3, ls="--")
             ax.set_xlabel("frequency [cycles/rad]")
             ax.set_ylabel("|FFT|")
@@ -517,6 +952,7 @@ def _save_roi_size_fft_spectra_pdf_for_planet_location(
                     float(panel["selected_target_freq"]),
                 )
             )
+            ax.legend(fontsize=8, loc="best")
             pdf.savefig(fig)
             plt.close(fig)
 
@@ -600,6 +1036,29 @@ def _save_planet_position_snr_summary_pdf(
     per_page = 6
     ncols = 2
     nrows = 3
+    summary_snr_keys = (
+        "snr",
+    )
+    summary_snr_all = np.asarray(
+        [
+            float(panel[key])
+            for item in location_panels
+            for panel in item["panels"]
+            for key in summary_snr_keys
+            if key in panel and np.isfinite(float(panel[key]))
+        ],
+        dtype=float,
+    )
+    if summary_snr_all.size > 0:
+        summary_ymin = float(np.min(summary_snr_all))
+        summary_ymax = float(np.max(summary_snr_all))
+        if summary_ymax <= summary_ymin:
+            summary_pad = max(abs(summary_ymax) * 0.05, 1e-6)
+        else:
+            summary_pad = 0.05 * (summary_ymax - summary_ymin)
+        summary_ylim = (summary_ymin - summary_pad, summary_ymax + summary_pad)
+    else:
+        summary_ylim = None
     with PdfPages(output_path) as pdf:
         for start in range(0, len(location_panels), per_page):
             chunk = location_panels[start:start + per_page]
@@ -614,24 +1073,30 @@ def _save_planet_position_snr_summary_pdf(
                     [float(panel["requested_roi_size_lamD"]) for panel in panels_sorted],
                     dtype=float,
                 )
-                snr_vals = np.asarray(
-                    [float(panel["snr"]) for panel in panels_sorted],
-                    dtype=float,
-                )
+                snr_series = [
+                    ("SNR", "snr", "tab:blue"),
+                ]
                 resolved_roi = np.asarray(
                     [float(panel["resolved_roi_size_lamD"]) for panel in panels_sorted],
                     dtype=float,
                 )
-                ax.plot(requested_roi, snr_vals, "-o", lw=1.8, ms=4.5, color="tab:blue")
+                for label, key, color in snr_series:
+                    if not all(key in panel for panel in panels_sorted):
+                        continue
+                    vals = np.asarray([float(panel[key]) for panel in panels_sorted], dtype=float)
+                    ax.plot(requested_roi, vals, "-o", lw=1.6, ms=4.0, color=color, label=label)
                 ax.set_xlabel("requested ROI size [λ/D]")
                 ax.set_ylabel("SNR")
                 ax.grid(alpha=0.3)
+                if summary_ylim is not None:
+                    ax.set_ylim(*summary_ylim)
                 title = (
                     f"r={float(item['planet_radius_lamD']):.3f} λ/D, "
                     f"theta={float(item['planet_theta_deg']):.1f} deg\n"
                     f"xy=({float(item['planet_center_lamD'][0]):+.3f}, {float(item['planet_center_lamD'][1]):+.3f})"
                 )
                 ax.set_title(title)
+                ax.legend(fontsize=7, loc="best")
                 if np.any(np.abs(resolved_roi - requested_roi) > 1e-12):
                     ax2 = ax.twinx()
                     ax2.plot(requested_roi, resolved_roi, "--s", lw=1.2, ms=3.5, color="tab:orange")
@@ -641,6 +1106,68 @@ def _save_planet_position_snr_summary_pdf(
                 ax.axis("off")
             pdf.savefig(fig)
             plt.close(fig)
+
+        # Add aggregated summary pages: mean SNR across theta for each sampled radius.
+        radius_groups: dict[float, list[dict[str, object]]] = {}
+        for item in location_panels:
+            radius_key = float(item["planet_radius_lamD"])
+            radius_groups.setdefault(radius_key, []).append(item)
+
+        grouped_radii = sorted(radius_groups.keys())
+        if len(grouped_radii) > 0:
+            for start in range(0, len(grouped_radii), per_page):
+                radius_chunk = grouped_radii[start:start + per_page]
+                fig, axes = plt.subplots(nrows, ncols, figsize=(11.0, 13.0), constrained_layout=True)
+                axes_flat = np.asarray(axes).ravel()
+                for ax, radius_key in zip(axes_flat, radius_chunk):
+                    items = radius_groups[radius_key]
+                    roi_to_snrs: dict[float, list[float]] = {}
+                    roi_to_resolved: dict[float, list[float]] = {}
+                    for item in items:
+                        for panel in item["panels"]:
+                            if "snr" not in panel:
+                                continue
+                            requested_roi = float(panel["requested_roi_size_lamD"])
+                            roi_to_snrs.setdefault(requested_roi, []).append(float(panel["snr"]))
+                            roi_to_resolved.setdefault(requested_roi, []).append(float(panel["resolved_roi_size_lamD"]))
+                    requested_roi = np.asarray(sorted(roi_to_snrs.keys()), dtype=float)
+                    mean_snr = np.asarray(
+                        [float(np.mean(np.asarray(roi_to_snrs[roi], dtype=float))) for roi in requested_roi],
+                        dtype=float,
+                    )
+                    mean_resolved = np.asarray(
+                        [float(np.mean(np.asarray(roi_to_resolved[roi], dtype=float))) for roi in requested_roi],
+                        dtype=float,
+                    )
+                    ax.plot(
+                        requested_roi,
+                        mean_snr,
+                        "-o",
+                        lw=1.8,
+                        ms=4.4,
+                        color="tab:purple",
+                        label="Mean SNR over theta",
+                    )
+                    ax.set_xlabel("requested ROI size [λ/D]")
+                    ax.set_ylabel("mean SNR over theta")
+                    ax.grid(alpha=0.3)
+                    if summary_ylim is not None:
+                        ax.set_ylim(*summary_ylim)
+                    theta_vals = sorted({float(item["planet_theta_deg"]) for item in items})
+                    ax.set_title(
+                        f"r={radius_key:.3f} λ/D\n"
+                        f"mean over theta ({len(theta_vals)} samples)"
+                    )
+                    ax.legend(fontsize=7, loc="best")
+                    if np.any(np.abs(mean_resolved - requested_roi) > 1e-12):
+                        ax2 = ax.twinx()
+                        ax2.plot(requested_roi, mean_resolved, "--s", lw=1.2, ms=3.5, color="tab:orange")
+                        ax2.set_ylabel("mean resolved ROI [λ/D]", color="tab:orange")
+                        ax2.tick_params(axis="y", labelcolor="tab:orange")
+                for ax in axes_flat[len(radius_chunk):]:
+                    ax.axis("off")
+                pdf.savefig(fig)
+                plt.close(fig)
 
 
 def _run_planet_position_roi_size_sweep(
@@ -702,7 +1229,10 @@ def _run_planet_position_roi_size_sweep(
             if float(radius_lamD) <= 0.0:
                 print(f"[planet-roi-polar] skipping radius {float(radius_lamD):+.3f} because orbit radius is zero")
                 continue
-            planet_center = _polar_to_cartesian_lamD(radius_lamD=float(radius_lamD), theta_deg=float(theta_deg))
+            planet_center = _polar_to_cartesian_lamD(
+                radius_lamD=float(radius_lamD),
+                theta_deg=float(theta_deg),
+            )
             sample_rows, best_entry, panels = _evaluate_best_roi_for_planet_center(
                 planet_center=planet_center,
                 roi_sizes=roi_sizes,
@@ -744,6 +1274,30 @@ def _run_planet_position_roi_size_sweep(
                     panels=panels,
                     extent=extent,
                 )
+                location_coh_pdf = os.path.join(
+                    location_dir,
+                    "planet_position_roi_size_sweep_coherence_maps_with_snr_24lamD_"
+                    f"{location_tag}",
+                )
+                location_coh_pdf = f"{location_coh_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
+                _save_roi_size_coherence_pdf_for_planet_location(
+                    output_path=location_coh_pdf,
+                    region_shape_name=region_shape_name,
+                    panels=panels,
+                    extent=extent,
+                )
+                location_max_minus_coh_pdf = os.path.join(
+                    location_dir,
+                    "planet_position_roi_size_sweep_max_minus_coherence_maps_24lamD_"
+                    f"{location_tag}",
+                )
+                location_max_minus_coh_pdf = f"{location_max_minus_coh_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
+                _save_roi_size_max_minus_coherence_pdf_for_planet_location(
+                    output_path=location_max_minus_coh_pdf,
+                    region_shape_name=region_shape_name,
+                    panels=panels,
+                    extent=extent,
+                )
                 if str(incoherence_map_mode).strip().lower() == "lab_fft_ratio":
                     location_fft_pdf = os.path.join(
                         location_dir,
@@ -771,8 +1325,12 @@ def _run_planet_position_roi_size_sweep(
                             "resolved_roi_size_lamD",
                             "n_circles",
                             "planet_peak",
-                            "annulus_median",
+                            "planet_std",
+                            "background_aperture_std",
+                            "raw_snr",
                             "snr",
+                            "background_aperture_mean",
+                            "background_aperture_std_centered",
                         ],
                     )
                     writer.writeheader()
@@ -803,8 +1361,12 @@ def _run_planet_position_roi_size_sweep(
                 "resolved_roi_size_lamD",
                 "n_circles",
                 "planet_peak",
-                "annulus_median",
+                "planet_std",
+                "background_aperture_std",
+                "raw_snr",
                 "snr",
+                "background_aperture_mean",
+                "background_aperture_std_centered",
             ],
         )
         writer.writeheader()
@@ -932,7 +1494,7 @@ def _run_planet_diagonal_roi_size_sweep(
                 "resolved_roi_size_lamD",
                 "n_circles",
                 "planet_peak",
-                "annulus_median",
+                "background_aperture_std",
                 "snr",
             ],
         )
@@ -944,7 +1506,7 @@ def _run_planet_diagonal_roi_size_sweep(
         snr_arr = np.asarray([float(row["snr"]) for row in best_rows], dtype=float)
         roi_arr = np.asarray([float(row["resolved_roi_size_lamD"]) for row in best_rows], dtype=float)
         peak_arr = np.asarray([float(row["planet_peak"]) for row in best_rows], dtype=float)
-        med_arr = np.asarray([float(row["annulus_median"]) for row in best_rows], dtype=float)
+        med_arr = np.asarray([float(row["background_aperture_std"]) for row in best_rows], dtype=float)
 
         fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.6), constrained_layout=True)
         axes[0].plot(t_arr, snr_arr, "-o", lw=1.8, ms=4.5, color="tab:blue")
@@ -974,7 +1536,7 @@ def _run_planet_diagonal_roi_size_sweep(
         axes_aux[1].plot(t_arr, med_arr, "-o", lw=1.8, ms=4.5, color="tab:green")
         axes_aux[1].set_title("Annulus Median at Best ROI")
         axes_aux[1].set_xlabel("diagonal t [λ/D]")
-        axes_aux[1].set_ylabel("annulus aperture std")
+        axes_aux[1].set_ylabel("background ring std")
         axes_aux[1].grid(alpha=0.3)
         out_aux = os.path.join(
             sweep_output_dir,
@@ -1244,7 +1806,7 @@ def _run_roi_size_sweep_snr_vs_theta(
     roi_max_tag = f"{roi_max:.3f}".replace(".", "p")
     roi_step_tag = f"{roi_step:.3f}".replace(".", "p")
     roi_sweep_tag = f"_rmin_{roi_min_tag}_rmax_{roi_max_tag}_rstep_{roi_step_tag}"
-    fixed_planet_eval_radius_lamD = 0.5
+    fixed_planet_eval_radius_lamD = SNR_APERTURE_RADIUS_LAMD
     snr_eps = 1e-12
 
     phase_cycles = float(args.phase_cycles)
@@ -1367,9 +1929,10 @@ def _run_roi_size_sweep_snr_vs_theta(
                     planet_center_lamD=planet_center_lamD,
                     orbit_radius_lamD=orbit_radius_lamD,
                     eval_radius_lamD=fixed_planet_eval_radius_lamD,
-                    annulus_half_width_lamD=0.5,
+                    annulus_half_width_lamD=SNR_ANNULUS_HALF_WIDTH_LAMD,
                     snr_eps=snr_eps,
                 )
+                planet_std = float(np.std(np.asarray(incoh[planet_mask], dtype=float))) if np.any(planet_mask) else float("nan")
                 snr_vals.append(snr)
                 table_rows.append(
                     {
@@ -1380,7 +1943,8 @@ def _run_roi_size_sweep_snr_vs_theta(
                         "active_center_x_lamD": float(ctr[0]),
                         "active_center_y_lamD": float(ctr[1]),
                         "planet_peak": float(peak),
-                        "annulus_median": float(med),
+                        "planet_std": float(planet_std),
+                        "background_aperture_std": float(med),
                         "snr": float(snr),
                     }
                 )
@@ -1405,7 +1969,7 @@ def _run_roi_size_sweep_snr_vs_theta(
                         edgecolor="white",
                         linewidth=0.3,
                         linestyle="-",
-                        label="planet region (r=0.5 λ/D)",
+                        label=f"planet region (r={fixed_planet_eval_radius_lamD:.1f} λ/D)",
                     )
                 )
                 ax_m.plot(
@@ -1421,7 +1985,7 @@ def _run_roi_size_sweep_snr_vs_theta(
                 ax_m.add_patch(
                     plt.Circle(
                         (0.0, 0.0),
-                        float(max(orbit_radius_lamD - 0.5, 0.0)),
+                        float(max(orbit_radius_lamD - SNR_ANNULUS_HALF_WIDTH_LAMD, 0.0)),
                         fill=False,
                         edgecolor="orange",
                         linewidth=1.2,
@@ -1431,7 +1995,7 @@ def _run_roi_size_sweep_snr_vs_theta(
                 ax_m.add_patch(
                     plt.Circle(
                         (0.0, 0.0),
-                        float(orbit_radius_lamD + 0.5),
+                        float(orbit_radius_lamD + SNR_ANNULUS_HALF_WIDTH_LAMD),
                         fill=False,
                         edgecolor="orange",
                         linewidth=1.2,
@@ -1466,7 +2030,10 @@ def _run_roi_size_sweep_snr_vs_theta(
                     ax_m.text(
                         0.02,
                         0.98,
-                        f"SNR={snr:.6e}\nsignal sum={peak:.6e}\nannulus aperture std={med:.6e}\nplanet eval r=0.5 λ/D",
+                        (
+                            f"SNR={snr:.6e}\nsignal mean={peak:.6e}\nbackground ring std={med:.6e}\n"
+                            f"planet eval r={fixed_planet_eval_radius_lamD:.1f} λ/D"
+                        ),
                         transform=ax_m.transAxes,
                         ha="left",
                         va="top",
@@ -1616,10 +2183,24 @@ def _run_roi_size_sweep_snr_vs_theta(
                     )
                 )
                 ax_p.add_patch(
-                    plt.Circle((0.0, 0.0), float(max(orbit_radius_lamD - 0.5, 0.0)), fill=False, edgecolor=copper_edge, linewidth=1.8, linestyle="--")
+                    plt.Circle(
+                        (0.0, 0.0),
+                        float(max(orbit_radius_lamD - SNR_ANNULUS_HALF_WIDTH_LAMD, 0.0)),
+                        fill=False,
+                        edgecolor=copper_edge,
+                        linewidth=1.8,
+                        linestyle="--",
+                    )
                 )
                 ax_p.add_patch(
-                    plt.Circle((0.0, 0.0), float(orbit_radius_lamD + 0.5), fill=False, edgecolor=copper_edge, linewidth=1.8, linestyle="--")
+                    plt.Circle(
+                        (0.0, 0.0),
+                        float(orbit_radius_lamD + SNR_ANNULUS_HALF_WIDTH_LAMD),
+                        fill=False,
+                        edgecolor=copper_edge,
+                        linewidth=1.8,
+                        linestyle="--",
+                    )
                 )
                 ax_p.set_title(
                     "Used {:.2f} λ/D\nSNR {:.2e}".format(
@@ -1792,7 +2373,8 @@ def _run_roi_size_sweep_snr_vs_theta(
                 "active_center_x_lamD",
                 "active_center_y_lamD",
                 "planet_peak",
-                "annulus_median",
+                "planet_std",
+                "background_aperture_std",
                 "snr",
             ],
         )
@@ -1829,7 +2411,7 @@ def _run_ring_rotation_sweep(
     rot_max_tag = f"{rot_max:.3f}".replace(".", "p")
     rot_step_tag = f"{rot_step:.3f}".replace(".", "p")
     rot_sweep_tag = f"_rotmax_{rot_max_tag}_rotstep_{rot_step_tag}"
-    fixed_planet_eval_radius_lamD = 0.5
+    fixed_planet_eval_radius_lamD = SNR_APERTURE_RADIUS_LAMD
     snr_eps = 1e-12
 
     phase_cycles = float(args.phase_cycles)
@@ -1964,9 +2546,15 @@ def _run_ring_rotation_sweep(
                 planet_center_lamD=planet_center_lamD,
                 orbit_radius_lamD=orbit_radius_lamD,
                 eval_radius_lamD=fixed_planet_eval_radius_lamD,
-                annulus_half_width_lamD=0.5,
+                annulus_half_width_lamD=SNR_ANNULUS_HALF_WIDTH_LAMD,
                 snr_eps=snr_eps,
             )
+            planet_mask = (
+                (xx16 - float(planet_center_lamD[0])) ** 2
+                + (yy16 - float(planet_center_lamD[1])) ** 2
+                <= fixed_planet_eval_radius_lamD ** 2
+            )
+            planet_std = float(np.std(np.asarray(incoh[planet_mask], dtype=float))) if np.any(planet_mask) else float("nan")
 
             rotations_used.append(float(rot_u))
             peaks.append(peak)
@@ -1980,7 +2568,8 @@ def _run_ring_rotation_sweep(
                     "resolved_region_radius_lamD": region_radius_lamD,
                     "n_circles": int(ring["n_circles"]),
                     "planet_peak": peak,
-                    "annulus_median": med,
+                    "planet_std": planet_std,
+                    "background_aperture_std": med,
                     "snr": snr,
                 }
             )
@@ -2214,7 +2803,7 @@ def _run_ring_rotation_sweep(
                 ax.add_patch(
                     plt.Circle(
                         (0.0, 0.0),
-                        float(max(orbit_radius_lamD - 0.5, 0.0)),
+                        float(max(orbit_radius_lamD - SNR_ANNULUS_HALF_WIDTH_LAMD, 0.0)),
                         fill=False,
                         edgecolor="#FFB347",
                         linewidth=1.8,
@@ -2224,7 +2813,7 @@ def _run_ring_rotation_sweep(
                 ax.add_patch(
                     plt.Circle(
                         (0.0, 0.0),
-                        float(orbit_radius_lamD + 0.5),
+                        float(orbit_radius_lamD + SNR_ANNULUS_HALF_WIDTH_LAMD),
                         fill=False,
                         edgecolor="#FFB347",
                         linewidth=1.8,
@@ -2315,7 +2904,8 @@ def _run_ring_rotation_sweep(
                 "resolved_region_radius_lamD",
                 "n_circles",
                 "planet_peak",
-                "annulus_median",
+                "planet_std",
+                "background_aperture_std",
                 "snr",
             ],
         )
@@ -2446,9 +3036,8 @@ def run_coc_planet_phase(
     if coc_secondary <= 0.0:
         coc_secondary = 0.25
     local_kwargs["secondary_diameter_ratio"] = float(coc_secondary)
-    if local_kwargs["spider_width_pixels"] <= 0.0:
-        local_kwargs["spider_width_pixels"] = 0.25
 
+    phase_screen_folder_tag = _phase_screen_folder_tag(args, sim_kwargs)
     fixed_center = (float(args.planet_offset_x_local), float(args.planet_offset_y_local))
     ring_radius_lamD = float(np.hypot(*fixed_center))
     initial_angle_rad = float(np.arctan2(fixed_center[1], fixed_center[0]))
@@ -2508,12 +3097,14 @@ def run_coc_planet_phase(
         f"_planet_x_{float_filename_token(planet_center[0], precision=3)}"
         f"_y_{float_filename_token(planet_center[1], precision=3)}"
         f"_pov_r_{float_filename_token(effective_args.local_region_radius, precision=3)}"
+        f"{phase_screen_folder_tag}"
     )
     os.makedirs(coc_planet_ratio_dir, exist_ok=True)
     coc_planet_ratio_dir_no_pov = (
         f"coc_planet_ratio_{float_filename_token(args.planet_flux_ratio_local, precision=6)}"
         f"_planet_x_{float_filename_token(planet_center[0], precision=3)}"
         f"_y_{float_filename_token(planet_center[1], precision=3)}"
+        f"{phase_screen_folder_tag}"
     )
 
     coc_phase_cycles = float(args.phase_cycles)
@@ -2572,6 +3163,7 @@ def run_coc_planet_phase(
             f"_theta_{float_filename_token(float(args.planet_position_theta_min_deg), precision=3)}"
             f"_{float_filename_token(float(args.planet_position_theta_max_deg), precision=3)}"
             f"_{float_filename_token(float(args.planet_position_theta_step_deg), precision=3)}"
+            f"{phase_screen_folder_tag}"
         )
         sweep_folder = os.path.join(polar_root, "planet_position_roi_size_sweep")
         _run_planet_position_roi_size_sweep(
