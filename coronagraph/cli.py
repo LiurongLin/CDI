@@ -282,6 +282,11 @@ def parse_args() -> argparse.Namespace:
         help="Secondary mirror diameter / primary diameter in [0,1).",
     )
     parser.add_argument(
+        "--disable-spiders",
+        action="store_true",
+        help="Disable spider vanes in the entrance pupil.",
+    )
+    parser.add_argument(
         "--spider-width",
         type=float,
         default=0.25,
@@ -512,35 +517,6 @@ def parse_args() -> argparse.Namespace:
         default=15.0,
         help="Planet theta step [deg] for the 2D planet-position sweep.",
     )
-    parser.add_argument(
-        "--planet-diagonal-roi-size-sweep",
-        action="store_true",
-        help="Enable a diagonal-only sweep over planet location and ROI size.",
-    )
-    parser.add_argument(
-        "--planet-diagonal-mode",
-        choices=["anti", "main"],
-        default="anti",
-        help="Diagonal to follow: 'anti' uses y=-x, 'main' uses y=x.",
-    )
-    parser.add_argument(
-        "--planet-diagonal-t-min",
-        type=float,
-        default=0.5,
-        help="Minimum diagonal parameter t [λ/D] for diagonal sweep.",
-    )
-    parser.add_argument(
-        "--planet-diagonal-t-max",
-        type=float,
-        default=4.0,
-        help="Maximum diagonal parameter t [λ/D] for diagonal sweep.",
-    )
-    parser.add_argument(
-        "--planet-diagonal-t-step",
-        type=float,
-        default=0.5,
-        help="Diagonal parameter step [λ/D] for diagonal sweep.",
-    )
     parser.add_argument("--coc-phase-samples", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--coc-phase-cycles", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--coc-planet-offset-x", type=float, default=None, help=argparse.SUPPRESS)
@@ -551,6 +527,11 @@ def parse_args() -> argparse.Namespace:
         "--build-map-per-fov",
         action="store_true",
         help="Build and save 16x16 lambda/D incoherence maps per active FOV period as a PDF.",
+    )
+    parser.add_argument(
+        "--plot-poster-figure",
+        action="store_true",
+        help="For the 2D planet-position ROI sweep, emit poster-styled coherence/incoherence PDFs only.",
     )
     parser.add_argument("--coc-fov-position-steps", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--coc-fov-circle-of-circles-trace", action="store_true", help=argparse.SUPPRESS)
@@ -576,8 +557,12 @@ def _resolve_features(args: argparse.Namespace) -> set[str]:
 def _build_sim_kwargs(args: argparse.Namespace) -> dict:
     sim_kwargs = default_sim_kwargs()
     sim_kwargs["secondary_diameter_ratio"] = float(args.secondary_ratio)
-    sim_kwargs["spider_width_pixels"] = float(args.spider_width)
-    sim_kwargs["spider_angles_deg"] = tuple(float(a) for a in args.spider_angles)
+    if bool(getattr(args, "disable_spiders", False)):
+        sim_kwargs["spider_width_pixels"] = 0.0
+        sim_kwargs["spider_angles_deg"] = tuple()
+    else:
+        sim_kwargs["spider_width_pixels"] = float(args.spider_width)
+        sim_kwargs["spider_angles_deg"] = tuple(float(a) for a in args.spider_angles)
     sim_kwargs["pupil_supersample"] = int(args.pupil_ss)
     sim_kwargs["phase_screen_path"] = resolve_phase_screen_path(args.phase_screen_jitter)
     sim_kwargs["phase_screen_index"] = 0

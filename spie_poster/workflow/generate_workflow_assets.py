@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from coronagraph.cli import default_sim_kwargs
+from coronagraph.coc_feature import _evaluate_best_roi_for_planet_center, _local_phase_region_kwargs
 from coronagraph.masks import VortexPhaseMask
 from coronagraph.region_shapes import annulus_radii_from_width
 from coronagraph.simulator import CoronagraphSimulator, resolve_phase_screen_path
@@ -22,23 +23,52 @@ from coronagraph.simulator import CoronagraphSimulator, resolve_phase_screen_pat
 OUTPUT_DIR = Path(__file__).resolve().parent
 DPI = 180
 
-PLANET_CENTER_LAMD = (4.5, -4.5)
-PLANET_FLUX_RATIO = 1e-3
+PLANET_CENTER_LAMD = (-7, 0)
+PLANET_FLUX_RATIO = 0.005
 PLANET_EVAL_RADIUS_LAMD = 0.5
-RING_WIDTH_LAMD = 2.0
+RING_WIDTH_LAMD = 4.0
 PHASE_CYCLES = 2.0
 MODULATION_STEPS_PER_CYCLE = 10
 REPRESENTATIVE_PHASES = np.array([0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi], dtype=float)
 SPECKLE_COUNT = 3
 SPECKLE_RADIUS_MATCH_TOL_LAMD = 0.35
 SPECKLE_APERTURE_RADIUS_LAMD = 0.35
-SPECKLE_MIN_SEPARATION_LAMD = 1.2
+SPECKLE_MIN_SEPARATION_LAMD = 2.5
 
 PHASE_MASK_NAME = "coc_phase_mask_modulation_vortex_charge_2_ring_width_2p0_4phase_quadrature_square.png"
 FINAL_PSF_NAME = "coc_final_psf_overlay_planet_circle_eval_radius_0p5_from_ring_width_2p0_with_companion_quadrature_square.png"
 TIME_SERIES_NAME = "coc_circle_intensity_sum_timeseries_vortex_charge_2_ring_width_2p0_eval_radius_0p5_cycles_2p0_with_companion_square.png"
 FFT_NAME = "coc_circle_intensity_sum_timeseries_fft_vortex_charge_2_ring_width_2p0_eval_radius_0p5_cycles_2p0_with_companion.png"
+COHERENCE_MAP_NAME = "coc_coherence_map_vortex_charge_2_ring_width_2p0_eval_radius_0p5_cycles_2p0_with_companion.png"
+INCOHERENCE_MAP_NAME = "coc_incoherence_map_vortex_charge_2_ring_width_2p0_eval_radius_0p5_cycles_2p0_with_companion.png"
 WORKFLOW_STRIP_NAME = "workflow.png"
+
+FG = "#000000"
+GRID = "#9FE7FF"
+
+
+def _style_transparent_figure(fig: plt.Figure, axes: np.ndarray | list | tuple) -> None:
+    fig.patch.set_alpha(0.0)
+    for ax in np.ravel(axes):
+        ax.set_facecolor("none")
+        ax.tick_params(colors=FG)
+        for spine in ax.spines.values():
+            spine.set_color(FG)
+        ax.xaxis.label.set_color(FG)
+        ax.yaxis.label.set_color(FG)
+        ax.title.set_color(FG)
+
+
+def _style_colorbar(cbar, *, label: str) -> None:
+    cbar.ax.yaxis.label.set_color(FG)
+    cbar.ax.tick_params(colors=FG)
+    cbar.outline.set_edgecolor(FG)
+    cbar.set_label(label)
+
+
+def _save_figure_both(fig: plt.Figure, output_path: Path, *, dpi: int = DPI, transparent: bool = True) -> None:
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", transparent=transparent)
+    fig.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight", transparent=transparent)
 
 
 def _build_sim_kwargs() -> dict:
@@ -46,7 +76,7 @@ def _build_sim_kwargs() -> dict:
     sim_kwargs.update(
         phase_mask=VortexPhaseMask(charge=2),
         secondary_diameter_ratio=0.25,
-        spider_width_pixels=0.25,
+        spider_width_pixels=0.0,
         spider_angles_deg=(0.0, 90.0),
         pupil_supersample=8,
         include_ghost=True,
@@ -55,7 +85,7 @@ def _build_sim_kwargs() -> dict:
         companion_flux_ratio=PLANET_FLUX_RATIO,
         companion_offset_lamD=PLANET_CENTER_LAMD,
         e_final_phase_offset=0.0,
-        phase_screen_path=resolve_phase_screen_path("10"),
+        phase_screen_path=resolve_phase_screen_path("0"),
         phase_screen_index=0,
     )
     ring_radius_lamD = float(math.hypot(*PLANET_CENTER_LAMD))
@@ -108,7 +138,7 @@ def _aperture_mask(xx: np.ndarray, yy: np.ndarray, center: tuple[float, float], 
 
 def _save_phase_mask_panels(sim_kwargs: dict, base_result: dict) -> None:
     sim = CoronagraphSimulator(**sim_kwargs)
-    sl, crop_lamD = _crop_slice(base_result, crop_radius_lamD=9.0)
+    sl, crop_lamD = _crop_slice(base_result, crop_radius_lamD= 14)
     fig, axes = plt.subplots(2, 2, figsize=(8.0, 8.0), constrained_layout=True)
     for ax, phase in zip(axes.ravel(), REPRESENTATIVE_PHASES):
         sim.focal_local_phase_offset = float(phase)
@@ -130,12 +160,13 @@ def _save_phase_mask_panels(sim_kwargs: dict, base_result: dict) -> None:
             origin="lower",
             extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD],
         )
-        ax.set_title(f"{phase / np.pi:.1f}pi", fontsize=12)
-        ax.set_xlabel("x [lambda/D]")
-        ax.set_ylabel("y [lambda/D]")
+        ax.set_title(rf"$\phi = {phase / np.pi:.1f}\pi$", fontsize=12)
+    fig.supxlabel(r"$x\;[\lambda/D]$", color=FG)
+    fig.supylabel(r"$y\;[\lambda/D]$", color=FG)
+    _style_transparent_figure(fig, axes)
     cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02)
-    cbar.set_label("Wrapped phase of vortex mask + modulation [rad]")
-    fig.savefig(OUTPUT_DIR / PHASE_MASK_NAME, dpi=DPI, bbox_inches="tight")
+    _style_colorbar(cbar, label=r"Wrapped phase of vortex mask + modulation [rad]")
+    _save_figure_both(fig, OUTPUT_DIR / PHASE_MASK_NAME, dpi=DPI, transparent=True)
     plt.close(fig)
 
 
@@ -143,11 +174,18 @@ def _select_speckles(image: np.ndarray, xx: np.ndarray, yy: np.ndarray) -> list[
     arr = np.asarray(image, dtype=float)
     rr = np.sqrt(xx**2 + yy**2)
     planet_radius_lamD = float(math.hypot(*PLANET_CENTER_LAMD))
+    planet_angle = float(math.atan2(PLANET_CENTER_LAMD[1], PLANET_CENTER_LAMD[0]))
     planet_aperture_mask = _aperture_mask(xx, yy, PLANET_CENTER_LAMD, PLANET_EVAL_RADIUS_LAMD)
-    candidate_mask = (
+    annulus_candidate_mask = (
         (np.abs(rr - planet_radius_lamD) <= SPECKLE_RADIUS_MATCH_TOL_LAMD)
         & (~planet_aperture_mask)
     )
+    theta = np.arctan2(yy, xx)
+    angle_delta = np.abs(np.angle(np.exp(1j * (theta - planet_angle))))
+    opposite_sector_mask = angle_delta >= (0.45 * np.pi)
+    candidate_mask = annulus_candidate_mask & opposite_sector_mask
+    if not np.any(candidate_mask):
+        candidate_mask = annulus_candidate_mask
     candidate_indices = np.argsort(arr[candidate_mask])[::-1]
     candidate_coords = np.argwhere(candidate_mask)
     selected: list[tuple[float, float]] = []
@@ -183,20 +221,30 @@ def _speckle_aperture_series(
 
 
 def _save_final_psf_panels(sim_kwargs: dict, base_result: dict, speckle_centers: list[tuple[float, float]]) -> None:
-    sl, crop_lamD = _crop_slice(base_result, crop_radius_lamD=9.0)
-    ring_radius_lamD = float(math.hypot(*PLANET_CENTER_LAMD))
+    sl, crop_lamD = _crop_slice(base_result, crop_radius_lamD= 14)
+    workflow_panel = _workflow_roi_panel(sim_kwargs=sim_kwargs)
+    ring_radius_lamD = float(workflow_panel["orbit_radius_lamD"])
     ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
         mid_radius_lamD=ring_radius_lamD,
-        width_lamD=RING_WIDTH_LAMD,
+        width_lamD=float(workflow_panel["resolved_roi_size_lamD"]),
     )
-    fig, axes = plt.subplots(2, 2, figsize=(8.0, 8.0), constrained_layout=True)
-    for ax, phase in zip(axes.ravel(), REPRESENTATIVE_PHASES):
+    roi_centers = [tuple(center) for center in workflow_panel["roi_centers_lamD"]]
+    fig, axes = plt.subplots(2, 2, figsize=(8.0, 8.0), sharex=True, sharey=True, constrained_layout=False)
+    for idx, (ax, phase) in enumerate(zip(axes.ravel(), REPRESENTATIVE_PHASES)):
         local_kwargs = dict(sim_kwargs)
-        local_kwargs["focal_local_phase_offset"] = float(phase)
+        local_kwargs.update(
+            focal_local_phase_offset=float(phase),
+            **_local_phase_region_kwargs(
+                region_shape_name="ring",
+                region_width_or_radius_lamD=float(workflow_panel["resolved_roi_size_lamD"]),
+                orbit_radius_lamD=float(workflow_panel["orbit_radius_lamD"]),
+                centers_lamD=roi_centers,
+            ),
+        )
         result = CoronagraphSimulator(**local_kwargs).run()
-        panel = result["final_psf_with_ghost"][sl, sl]
+        image_panel = result["final_psf_with_ghost"][sl, sl]
         im = ax.imshow(
-            np.log10(panel + 1e-12),
+            np.log10(image_panel + 1e-12),
             origin="lower",
             cmap="inferno",
             extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD],
@@ -209,31 +257,43 @@ def _save_final_psf_panels(sim_kwargs: dict, base_result: dict, speckle_centers:
         ax.annotate(
             "Planet",
             xy=PLANET_CENTER_LAMD,
-            xytext=(crop_lamD - 0.3, PLANET_CENTER_LAMD[1] + 1.0),
+            xytext=(PLANET_CENTER_LAMD[0] + 2.0, PLANET_CENTER_LAMD[1] + 1.0),
             color="white",
             fontsize=8,
             ha="right",
             va="bottom",
             arrowprops=dict(arrowstyle="->", color="white", lw=1.0),
         )
-        callout_y = min(crop_lamD - 0.8, max(sy for _, sy in speckle_centers) + 1.2)
+        callout_y = min(crop_lamD - 1.2, max(sy for _, sy in speckle_centers) + 0.6)
         for speckle_idx, (sx, sy) in enumerate(speckle_centers, start=1):
+            text_x = sx - 1.0
+            text_y = sy + 0.8
+            if speckle_idx == 1:
+                text_x = sx - 0.8
+                text_y = sy + 2.0
             ax.annotate(
                 f"S{speckle_idx}",
                 xy=(sx, sy),
-                xytext=(-crop_lamD + 0.4, callout_y - 1.0 * (speckle_idx - 1)),
+                xytext=(text_x, text_y),
                 color="#ffd966",
                 fontsize=8,
                 ha="left",
                 va="center",
                 arrowprops=dict(arrowstyle="->", color="#ffd966", lw=0.9),
             )
-        ax.set_title(f"{phase / np.pi:.1f}pi", fontsize=12)
-        ax.set_xlabel("x [lambda/D]")
-        ax.set_ylabel("y [lambda/D]")
+        ax.set_title(rf"$\phi = {phase / np.pi:.1f}\pi$", fontsize=12)
+        row_idx, col_idx = divmod(idx, 2)
+        if row_idx == 0:
+            ax.tick_params(axis="x", labelbottom=False)
+        if col_idx == 1:
+            ax.tick_params(axis="y", labelleft=False)
+    fig.supxlabel(r"$x\;[\lambda/D]$", color=FG)
+    fig.supylabel(r"$y\;[\lambda/D]$", color=FG)
+    fig.subplots_adjust(left=0.07, right=0.90, bottom=0.07, top=0.94, wspace=0.12, hspace=0.22)
+    _style_transparent_figure(fig, axes)
     cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02)
-    cbar.set_label("log10 intensity")
-    fig.savefig(OUTPUT_DIR / FINAL_PSF_NAME, dpi=DPI, bbox_inches="tight")
+    _style_colorbar(cbar, label=r"$\log_{10}$ intensity")
+    _save_figure_both(fig, OUTPUT_DIR / FINAL_PSF_NAME, dpi=DPI, transparent=True)
     plt.close(fig)
 
 
@@ -267,13 +327,21 @@ def _save_time_series(phase_offsets: np.ndarray, aperture_traces: np.ndarray, la
             linewidths=0.6 if is_planet else 0.0,
             zorder=5 if is_planet else 3,
         )
-    ax.set_xlabel("Local phase offset [pi rad]")
-    ax.set_ylabel("Aperture sum")
-    ax.set_title("Planet and Same-Radius Speckle Sums vs Local Phase Offset")
+    ax.set_xlabel(r"Local phase offset $\phi/\pi$")
+    ax.set_ylabel(r"Aperture sum")
+    ax.set_title(r"Planet and Same-Radius Speckle Sums vs. Local Phase Offset")
     ax.set_xlim(float(phase_offsets[0] / np.pi), float(phase_offsets[-1] / np.pi))
-    ax.grid(alpha=0.3)
+    ax.grid(alpha=0.3, color=GRID)
     ax.legend(loc="best")
-    fig.savefig(OUTPUT_DIR / TIME_SERIES_NAME, dpi=DPI, bbox_inches="tight")
+    legend = ax.get_legend()
+    if legend is not None:
+        legend.get_frame().set_alpha(0.18)
+        legend.get_frame().set_facecolor("black")
+        legend.get_frame().set_edgecolor(FG)
+        for text in legend.get_texts():
+            text.set_color(FG)
+    _style_transparent_figure(fig, [ax])
+    _save_figure_both(fig, OUTPUT_DIR / TIME_SERIES_NAME, dpi=DPI, transparent=True)
     plt.close(fig)
 
 
@@ -284,8 +352,10 @@ def _save_fft(phase_offsets: np.ndarray, aperture_traces: np.ndarray, labels: li
         aperture_traces = aperture_traces[:, :-1]
     dphi = float(np.mean(np.diff(phase_fft)))
     freqs = np.fft.fftfreq(aperture_traces.shape[1], d=dphi)
+    total_time = float(aperture_traces.shape[1] * dphi)
+    freqs_total_time = freqs * total_time
     pos = freqs >= 0.0
-    fft_width = 0.03
+    fft_width = 0.06
 
     fig, ax = plt.subplots(figsize=(6.6, 6.1), constrained_layout=True)
     colors = ["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd"]
@@ -296,7 +366,7 @@ def _save_fft(phase_offsets: np.ndarray, aperture_traces: np.ndarray, labels: li
         color = colors[idx % len(colors)]
         is_planet = idx == 0
         ax.plot(
-            freqs[pos],
+            freqs_total_time[pos],
             amp[pos],
             color=color,
             linewidth=3.2 if is_planet else 2.0,
@@ -304,7 +374,7 @@ def _save_fft(phase_offsets: np.ndarray, aperture_traces: np.ndarray, labels: li
             zorder=4 if is_planet else 2,
         )
         ax.scatter(
-            freqs[pos],
+            freqs_total_time[pos],
             amp[pos],
             color=color,
             s=34 if is_planet else 18,
@@ -314,7 +384,7 @@ def _save_fft(phase_offsets: np.ndarray, aperture_traces: np.ndarray, labels: li
             zorder=5 if is_planet else 3,
         )
 
-    pos_freqs = freqs[pos]
+    pos_freqs = freqs_total_time[pos]
     if pos_freqs.size >= 2 and positive_amps:
         mean_amp = np.mean(np.vstack(positive_amps), axis=0)
         dc_freq = float(pos_freqs[0])
@@ -324,8 +394,10 @@ def _save_fft(phase_offsets: np.ndarray, aperture_traces: np.ndarray, labels: li
         dc_right = dc_freq + 0.5 * fft_width
         ac_left = ac_freq - 0.5 * fft_width
         ac_right = ac_freq + 0.5 * fft_width
-        ax.axvspan(dc_left, dc_right, color="#ffef99", alpha=0.35, zorder=0)
-        ax.axvspan(ac_left, ac_right, color="#9fd5ff", alpha=0.30, zorder=0)
+        ax.axvspan(dc_left, dc_right, color="#ffef99", alpha=0.50, zorder=0)
+        ax.axvspan(ac_left, ac_right, color="#9fd5ff", alpha=0.45, zorder=0)
+        ax.axvline(dc_freq, color="#c49a00", lw=2.2, alpha=0.95, zorder=1)
+        ax.axvline(ac_freq, color="#1f77b4", lw=2.2, alpha=0.95, zorder=1)
         ymax = float(np.max(mean_amp)) if np.isfinite(np.max(mean_amp)) else 1.0
         ax.text(
             dc_freq + 0.004,
@@ -347,13 +419,125 @@ def _save_fft(phase_offsets: np.ndarray, aperture_traces: np.ndarray, labels: li
             va="top",
             bbox=dict(boxstyle="round,pad=0.2", facecolor="#dff1ff", edgecolor="none", alpha=0.85),
         )
-    ax.set_xlabel("Frequency [cycles/rad]")
-    ax.set_ylabel("Amplitude")
-    ax.set_title("FFT in Time of Planet and Same-Radius Speckle Traces")
-    ax.grid(alpha=0.3)
+    ax.set_xlabel(r"Frequency [cycles / total time]")
+    ax.set_ylabel(r"Amplitude")
+    ax.set_title(r"$|FFT|$ of Planet and Same-Radius Speckle Traces")
+    ax.grid(alpha=0.3, color=GRID)
     ax.legend(loc="best")
-    fig.savefig(OUTPUT_DIR / FFT_NAME, dpi=DPI, bbox_inches="tight")
+    legend = ax.get_legend()
+    if legend is not None:
+        legend.get_frame().set_alpha(0.18)
+        legend.get_frame().set_facecolor("black")
+        legend.get_frame().set_edgecolor(FG)
+        for text in legend.get_texts():
+            text.set_color(FG)
+    _style_transparent_figure(fig, [ax])
+    _save_figure_both(fig, OUTPUT_DIR / FFT_NAME, dpi=DPI, transparent=True)
     plt.close(fig)
+
+
+def _build_central_phase_stack(phase_offsets: np.ndarray, sim_kwargs: dict) -> tuple[np.ndarray, float, float]:
+    sample_result = CoronagraphSimulator(**sim_kwargs).run()
+    n_fft = int(sample_result["n_fft"])
+    focal_sampling = float(sample_result["focal_sampling"])
+    central_box_lamD = 24.0
+    half = int(0.5 * central_box_lamD * focal_sampling)
+    center = n_fft // 2
+    sl = slice(center - half, center + half)
+    stack = np.zeros((phase_offsets.size, 2 * half, 2 * half), dtype=float)
+    for idx, phase in enumerate(phase_offsets):
+        local_kwargs = dict(sim_kwargs)
+        local_kwargs.update(
+            focal_local_phase_offset=float(phase),
+            **_local_phase_region_kwargs(
+                region_shape_name="ring",
+                region_width_or_radius_lamD=float(RING_WIDTH_LAMD),
+                orbit_radius_lamD=float(math.hypot(*PLANET_CENTER_LAMD)),
+                centers_lamD=[PLANET_CENTER_LAMD],
+            ),
+        )
+        result = CoronagraphSimulator(**local_kwargs).run()
+        stack[idx] = np.asarray(result["final_psf_with_ghost"], dtype=float)[sl, sl]
+    return stack, central_box_lamD, focal_sampling
+
+
+def _workflow_roi_panel(sim_kwargs: dict) -> dict[str, object]:
+    sample_result = CoronagraphSimulator(**sim_kwargs).run()
+    n_fft = int(sample_result["n_fft"])
+    focal_sampling = float(sample_result["focal_sampling"])
+    central_box_lamD = 24.0
+    half = int(0.5 * central_box_lamD * focal_sampling)
+    center = n_fft // 2
+    sl = slice(center - half, center + half)
+    x = np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, 2 * half, endpoint=False)
+    y = np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, 2 * half, endpoint=False)
+    xx, yy = np.meshgrid(x, y)
+    phase_offsets = _phase_sweep_series()
+    _, _, panels = _evaluate_best_roi_for_planet_center(
+        planet_center=PLANET_CENTER_LAMD,
+        roi_sizes=np.array([RING_WIDTH_LAMD], dtype=float),
+        region_shape_name="ring",
+        sim_local=dict(sim_kwargs),
+        phase_offsets=phase_offsets,
+        sl16=sl,
+        half16=half,
+        xx16=xx,
+        yy16=yy,
+        incoherence_map_mode="lab_fft_ratio",
+        collect_panels=True,
+    )
+    if len(panels) != 1:
+        raise RuntimeError(f"Expected one workflow ROI panel, got {len(panels)}")
+    return panels[0]
+
+
+def _save_coherence_incoherence_maps(phase_offsets: np.ndarray, sim_kwargs: dict) -> None:
+    panel = _workflow_roi_panel(sim_kwargs=sim_kwargs)
+    image_extent_box_lamD = 24.0
+    extent = [-0.5 * image_extent_box_lamD, 0.5 * image_extent_box_lamD, -0.5 * image_extent_box_lamD, 0.5 * image_extent_box_lamD]
+    selected_target_freq = float(panel["selected_target_freq"])
+
+    for output_name, image, cmap, title, cbar_label in (
+        (
+            INCOHERENCE_MAP_NAME,
+            np.asarray(panel["incoherence_map"], dtype=float),
+            "inferno",
+            "",
+            "Incoherence Value",
+        ),
+        (
+            COHERENCE_MAP_NAME,
+            np.asarray(panel["coherence_map"], dtype=float),
+            "inferno",
+            "",
+            "Coherence Value",
+        ),
+    ):
+        fig, ax = plt.subplots(figsize=(6.2, 5.8), constrained_layout=True)
+        imshow_kwargs = {}
+        finite_vals = image[np.isfinite(image)]
+        if finite_vals.size > 0:
+            imshow_kwargs["vmax"] = float(np.percentile(finite_vals, 99.5))
+        im = ax.imshow(image, origin="lower", cmap=cmap, extent=extent, **imshow_kwargs)
+        if title:
+            ax.set_title(title)
+        ax.annotate(
+            "planet",
+            xy=PLANET_CENTER_LAMD,
+            xytext=(PLANET_CENTER_LAMD[0] - 2.0, PLANET_CENTER_LAMD[1] + 1.7),
+            color="white",
+            fontsize=11,
+            ha="right",
+            va="bottom",
+            arrowprops=dict(arrowstyle="->", color="white", lw=1.1),
+        )
+        ax.set_xlabel(r"$x\;[\lambda/D]$")
+        ax.set_ylabel(r"$y\;[\lambda/D]$")
+        _style_transparent_figure(fig, [ax])
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        _style_colorbar(cbar, label=cbar_label)
+        _save_figure_both(fig, OUTPUT_DIR / output_name, dpi=DPI, transparent=True)
+        plt.close(fig)
 
 
 def _fit_panel(image: Image.Image, panel_width: int, panel_height: int, pad: int, bg: str) -> Image.Image:
@@ -434,12 +618,13 @@ def main() -> None:
     _save_final_psf_panels(sim_kwargs=sim_kwargs, base_result=base_result, speckle_centers=speckle_centers)
     _save_time_series(phase_offsets=phase_offsets, aperture_traces=aperture_traces, labels=trace_labels)
     _save_fft(phase_offsets=phase_offsets, aperture_traces=aperture_traces, labels=trace_labels)
-    _save_workflow_strip()
+    _save_coherence_incoherence_maps(phase_offsets=phase_offsets, sim_kwargs=sim_kwargs)
     print(f"Saved {PHASE_MASK_NAME}")
     print(f"Saved {FINAL_PSF_NAME}")
     print(f"Saved {TIME_SERIES_NAME}")
     print(f"Saved {FFT_NAME}")
-    print(f"Saved {WORKFLOW_STRIP_NAME}")
+    print(f"Saved {COHERENCE_MAP_NAME}")
+    print(f"Saved {INCOHERENCE_MAP_NAME}")
 
 
 if __name__ == "__main__":

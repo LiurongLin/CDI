@@ -87,6 +87,8 @@ class CoronagraphSimulator:
         Local first-focal-plane region geometry: "circle" or "ring".
     focal_local_phase_radius_lamD : float
         Circular region radius in lambda/D for local first-focal-plane phase application.
+    focal_local_phase_ring_center_lamD : tuple[float, float]
+        Ring-region center (x, y) in lambda/D when ``focal_local_phase_shape="ring"``.
     focal_local_phase_inner_radius_lamD : float
         Inner radius in lambda/D when ``focal_local_phase_shape="ring"``.
     focal_local_phase_outer_radius_lamD : float
@@ -134,6 +136,7 @@ class CoronagraphSimulator:
         focal_local_phase_centers_lamD: tuple[tuple[float, float], ...] = (),
         focal_local_phase_shape: str = "circle",
         focal_local_phase_radius_lamD: float = 0.0,
+        focal_local_phase_ring_center_lamD: tuple[float, float] = (0.0, 0.0),
         focal_local_phase_inner_radius_lamD: float = 0.0,
         focal_local_phase_outer_radius_lamD: float = 0.0,
         secondary_diameter_ratio: float = 0.0,
@@ -177,6 +180,10 @@ class CoronagraphSimulator:
         )
         self.focal_local_phase_shape = str(focal_local_phase_shape).strip().lower()
         self.focal_local_phase_radius_lamD = float(focal_local_phase_radius_lamD)
+        self.focal_local_phase_ring_center_lamD = (
+            float(focal_local_phase_ring_center_lamD[0]),
+            float(focal_local_phase_ring_center_lamD[1]),
+        )
         self.focal_local_phase_inner_radius_lamD = float(focal_local_phase_inner_radius_lamD)
         self.focal_local_phase_outer_radius_lamD = float(focal_local_phase_outer_radius_lamD)
         self.secondary_diameter_ratio = float(secondary_diameter_ratio)
@@ -445,6 +452,7 @@ class CoronagraphSimulator:
                 self.n_fft,
                 self.focal_sampling,
                 self.focal_local_phase_shape,
+                self.focal_local_phase_ring_center_lamD,
                 self.focal_local_phase_inner_radius_lamD,
                 self.focal_local_phase_outer_radius_lamD,
             )
@@ -466,7 +474,10 @@ class CoronagraphSimulator:
             x_lamD = self._x / self.focal_sampling
             y_lamD = self._y / self.focal_sampling
             if self.focal_local_phase_shape == "ring":
-                rr = np.sqrt(x_lamD**2 + y_lamD**2)
+                rr = np.sqrt(
+                    (x_lamD - self.focal_local_phase_ring_center_lamD[0]) ** 2
+                    + (y_lamD - self.focal_local_phase_ring_center_lamD[1]) ** 2
+                )
                 region = (
                     (rr >= self.focal_local_phase_inner_radius_lamD)
                     & (rr <= self.focal_local_phase_outer_radius_lamD)
@@ -611,6 +622,7 @@ class CoronagraphSimulator:
             focal_local_phase_centers_lamD=self.focal_local_phase_centers_lamD,
             focal_local_phase_shape=self.focal_local_phase_shape,
             focal_local_phase_radius_lamD=self.focal_local_phase_radius_lamD,
+            focal_local_phase_ring_center_lamD=self.focal_local_phase_ring_center_lamD,
             focal_local_phase_inner_radius_lamD=self.focal_local_phase_inner_radius_lamD,
             focal_local_phase_outer_radius_lamD=self.focal_local_phase_outer_radius_lamD,
             secondary_diameter_ratio=self.secondary_diameter_ratio,
@@ -626,6 +638,21 @@ class CoronagraphSimulator:
     def _shift_complex(field: np.ndarray, dx_pix: int, dy_pix: int) -> np.ndarray:
         """Integer-pixel shift for complex field placement."""
         return np.roll(np.roll(field, shift=dy_pix, axis=0), shift=dx_pix, axis=1)
+
+    def _shift_complex_subpixel(self, field: np.ndarray, dx_pix: float, dy_pix: float) -> np.ndarray:
+        """Subpixel shift for a complex focal-plane field using the Fourier shift theorem."""
+        if np.isclose(dx_pix, 0.0) and np.isclose(dy_pix, 0.0):
+            return field
+        ky = np.fft.fftfreq(field.shape[0])
+        kx = np.fft.fftfreq(field.shape[1])
+        phase_ramp = np.exp(
+            -2j * np.pi * (
+                ky[:, None] * float(dy_pix)
+                + kx[None, :] * float(dx_pix)
+            )
+        )
+        shifted = np.fft.ifft2(np.fft.fft2(field) * phase_ramp)
+        return shifted.astype(np.complex128, copy=False)
 
     def run(self) -> dict:
         entrance_pupil = self.entrance_pupil()
@@ -679,10 +706,18 @@ class CoronagraphSimulator:
             e_ghost_lyot_stopped = e_ghost_lyot * lyot_stop
             e_ghost_final = self._centered_fft2(e_ghost_lyot_stopped)
             ghost_seed_field = e_ghost_final / np.sqrt(norm)
-        dx_pix = int(np.round(self.ghost_offset_lamD[0] * self.focal_sampling))
-        dy_pix = int(np.round(self.ghost_offset_lamD[1] * self.focal_sampling))
+        ghost_offset_is_zero = (
+            np.isclose(self.ghost_offset_lamD[0], 0.0)
+            and np.isclose(self.ghost_offset_lamD[1], 0.0)
+        )
+        if ghost_offset_is_zero:
+            dx_pix = float(self.focal_shift_pixels[0])
+            dy_pix = float(self.focal_shift_pixels[1])
+        else:
+            dx_pix = float(self.ghost_offset_lamD[0] * self.focal_sampling)
+            dy_pix = float(self.ghost_offset_lamD[1] * self.focal_sampling)
         ghost_field = (
-            self._shift_complex(ghost_seed_field, dx_pix=dx_pix, dy_pix=dy_pix)
+            self._shift_complex_subpixel(ghost_seed_field, dx_pix=dx_pix, dy_pix=dy_pix)
             * np.exp(1j * self.ghost_phase_rad)
         )
         ghost_psf = np.abs(ghost_field) ** 2
@@ -822,6 +857,7 @@ class CoronagraphSimulator:
             "focal_local_phase_shape": self.focal_local_phase_shape,
             "focal_local_phase_radius_lamD": self.focal_local_phase_radius_lamD,
             "focal_local_phase_centers_lamD": self.focal_local_phase_centers_lamD,
+            "focal_local_phase_ring_center_lamD": self.focal_local_phase_ring_center_lamD,
             "focal_local_phase_inner_radius_lamD": self.focal_local_phase_inner_radius_lamD,
             "focal_local_phase_outer_radius_lamD": self.focal_local_phase_outer_radius_lamD,
         }
