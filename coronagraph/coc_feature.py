@@ -7,6 +7,7 @@ import time
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import FancyBboxPatch
 
 from .plotting import (
     _coc_build_incoherence_maps,
@@ -615,6 +616,7 @@ def _save_roi_size_incoherence_pdf_for_planet_location(
     region_shape_name: str,
     panels: list[dict[str, object]],
     extent: list[float],
+    poster_figure: bool = False,
 ) -> None:
     _save_roi_size_map_pdf_for_planet_location(
         output_path=output_path,
@@ -623,13 +625,14 @@ def _save_roi_size_incoherence_pdf_for_planet_location(
         extent=extent,
         map_key="incoherence_map",
         title_prefix="Incoherence",
-        cmap="viridis",
+        cmap="inferno",
         snr_key="snr",
         snr_label="SNR",
         curve_snr_key="snr",
         curve_snr_label="SNR",
         vmax_percentile=90.0,
-        include_mean_map_page=True,
+        include_mean_map_page=not bool(poster_figure),
+        poster_figure=poster_figure,
     )
 
 
@@ -639,6 +642,7 @@ def _save_roi_size_coherence_pdf_for_planet_location(
     region_shape_name: str,
     panels: list[dict[str, object]],
     extent: list[float],
+    poster_figure: bool = False,
 ) -> None:
     _save_roi_size_map_pdf_for_planet_location(
         output_path=output_path,
@@ -647,12 +651,13 @@ def _save_roi_size_coherence_pdf_for_planet_location(
         extent=extent,
         map_key="coherence_map",
         title_prefix="Coherence",
-        cmap="viridis",
+        cmap="inferno",
         snr_key="snr",
         snr_label="SNR",
         curve_snr_key="snr",
         curve_snr_label="SNR",
-        vmax_percentile=98.0,
+        vmax_percentile=99.0,
+        poster_figure=poster_figure,
     )
 
 
@@ -695,6 +700,7 @@ def _save_roi_size_map_pdf_for_planet_location(
     vmin_percentile: float | None = None,
     vmax_percentile: float = 98.0,
     include_mean_map_page: bool = False,
+    poster_figure: bool = False,
 ) -> None:
     from matplotlib.backends.backend_pdf import PdfPages
 
@@ -727,17 +733,46 @@ def _save_roi_size_map_pdf_for_planet_location(
     n_panels = len(panels_sorted)
     ncols = min(4, max(2, int(np.ceil(np.sqrt(n_panels)))))
     nrows_maps = int(np.ceil(float(n_panels) / float(ncols)))
-    height_ratios = [1.0] * nrows_maps + [1.25]
+    map_title_size = 18 if poster_figure else 8
+    map_subtitle_size = 15 if poster_figure else 8
+    axis_label_size = 16 if poster_figure else 10
+    tick_label_size = 13 if poster_figure else 10
+    annotation_size = 14 if poster_figure else 8
+    overlay_linewidth = 2.8 if poster_figure else 1.4
+    arrow_linewidth = 2.0 if poster_figure else 1.0
+    spine_linewidth = 2.0 if poster_figure else 0.8
+    panel_title_pad = 16 if poster_figure else 6
+    if poster_figure:
+        figure_kwargs = {
+            "figsize": (5.8 * ncols, 5.4 * nrows_maps),
+            "constrained_layout": False,
+        }
+    else:
+        height_ratios = [1.0] * nrows_maps + [1.25]
+        figure_kwargs = {
+            "figsize": (4.4 * ncols, 3.6 * nrows_maps + 3.8),
+            "constrained_layout": True,
+        }
 
     with PdfPages(output_path) as pdf:
-        fig = plt.figure(
-            figsize=(4.4 * ncols, 3.6 * nrows_maps + 3.8),
-            constrained_layout=True,
-        )
-        gs = fig.add_gridspec(nrows_maps + 1, ncols, height_ratios=height_ratios)
+        fig = plt.figure(**figure_kwargs)
+        if poster_figure:
+            gs = fig.add_gridspec(nrows_maps, ncols, wspace=0.06, hspace=0.08)
+        else:
+            gs = fig.add_gridspec(nrows_maps + 1, ncols, height_ratios=height_ratios)
+        first_panel = panels_sorted[0]
+        first_ax = None
+        poster_colorbar_image = None
+        poster_colorbar_label = None
 
         for idx, panel in enumerate(panels_sorted):
-            ax = fig.add_subplot(gs[idx // ncols, idx % ncols])
+            subplot_kwargs = {}
+            if first_ax is not None:
+                subplot_kwargs["sharex"] = first_ax
+                subplot_kwargs["sharey"] = first_ax
+            ax = fig.add_subplot(gs[idx // ncols, idx % ncols], **subplot_kwargs)
+            if first_ax is None:
+                first_ax = ax
             map_arr = np.asarray(panel[map_key], dtype=float)
             finite_vals = map_arr[np.isfinite(map_arr)]
             if finite_vals.size > 0:
@@ -752,89 +787,182 @@ def _save_roi_size_map_pdf_for_planet_location(
             vmax = max(vmax, 1e-20)
             if vmax <= vmin:
                 vmax = vmin + 1e-20
+            map_to_show = map_arr
+            cbar_label = None
+            imshow_kwargs: dict[str, float] = {}
+            if poster_figure:
+                cbar_label = f"{title_prefix} value"
+                imshow_kwargs["vmax"] = float(np.percentile(finite_vals, 99.5)) if finite_vals.size > 0 else 1.0
             im = ax.imshow(
-                map_arr,
+                map_to_show,
                 origin="lower",
                 cmap=cmap,
                 extent=extent,
-                vmin=vmin,
-                vmax=vmax,
+                **(imshow_kwargs if poster_figure else {"vmin": vmin, "vmax": vmax}),
             )
+            rounded_clip = None
+            if poster_figure:
+                ax.set_facecolor((0.0, 0.0, 0.0, 0.0))
+                rounded_clip = FancyBboxPatch(
+                    (0.0, 0.0),
+                    1.0,
+                    1.0,
+                    boxstyle="round,pad=0.0,rounding_size=0.045",
+                    transform=ax.transAxes,
+                    facecolor="none",
+                    edgecolor="none",
+                )
+                ax.add_patch(rounded_clip)
+                im.set_clip_path(rounded_clip)
             planet_center = panel["planet_center_lamD"]
             orbit_radius_lamD = float(panel["orbit_radius_lamD"])
             roi_centers = panel["roi_centers_lamD"]
             roi_size = float(panel["resolved_roi_size_lamD"])
             planet_x = float(planet_center[0])
             planet_y = float(planet_center[1])
-            x_text = extent[1] - 0.8 if planet_x >= 0.0 else extent[0] + 0.8
+            x_text = extent[1] - 2.2 if planet_x >= 0.0 else extent[0] + 2.2
             x_align = "right" if planet_x >= 0.0 else "left"
             ax.annotate(
                 "Planet",
                 xy=(planet_x, planet_y),
-                xytext=(x_text, planet_y + 0.9),
+                xytext=(x_text, planet_y + 1.75),
                 color="white",
-                fontsize=8,
+                fontsize=annotation_size,
                 ha=x_align,
                 va="bottom",
-                arrowprops=dict(arrowstyle="->", color="white", lw=1.0),
+                fontweight="bold" if poster_figure else None,
+                bbox=(
+                    dict(boxstyle="round,pad=0.18", facecolor="black", edgecolor="none", alpha=0.88)
+                    if poster_figure
+                    else None
+                ),
+                arrowprops=dict(arrowstyle="->", color="white", lw=1.4 if poster_figure else arrow_linewidth),
             )
             if region_shape_name == "ring":
                 ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
                     mid_radius_lamD=orbit_radius_lamD,
                     width_lamD=roi_size,
                 )
-                ax.add_patch(plt.Circle((0.0, 0.0), float(ring_rmin_lamD), fill=False, edgecolor="lime", linewidth=1.4))
-                ax.add_patch(plt.Circle((0.0, 0.0), float(ring_rmax_lamD), fill=False, edgecolor="cyan", linewidth=1.4))
+                patch_inner = plt.Circle((0.0, 0.0), float(ring_rmin_lamD), fill=False, edgecolor="lime", linewidth=overlay_linewidth)
+                patch_outer = plt.Circle((0.0, 0.0), float(ring_rmax_lamD), fill=False, edgecolor="cyan", linewidth=overlay_linewidth)
+                if rounded_clip is not None:
+                    patch_inner.set_clip_path(rounded_clip)
+                    patch_outer.set_clip_path(rounded_clip)
+                ax.add_patch(patch_inner)
+                ax.add_patch(patch_outer)
             else:
                 for j, (cx, cy) in enumerate(roi_centers):
                     edge = "lime" if j == 0 else "cyan"
-                    ax.add_patch(plt.Circle((float(cx), float(cy)), roi_size, fill=False, edgecolor=edge, linewidth=1.4))
+                    patch = plt.Circle((float(cx), float(cy)), roi_size, fill=False, edgecolor=edge, linewidth=overlay_linewidth)
+                    if rounded_clip is not None:
+                        patch.set_clip_path(rounded_clip)
+                    ax.add_patch(patch)
+            if not poster_figure:
+                ax.set_title(
+                    f"ROI {float(panel['requested_roi_size_lamD']):.2f} → {roi_size:.2f} λ/D",
+                    fontsize=map_title_size,
+                    pad=panel_title_pad,
+                    fontweight="bold" if poster_figure else None,
+                )
             if snr_key is not None and snr_label is not None and snr_key in panel:
-                title_text = (
-                    f"{title_prefix} | ROI {float(panel['requested_roi_size_lamD']):.2f} -> {roi_size:.2f}\n"
-                    f"{str(snr_label)} {float(panel[snr_key]):.3e}"
-                )
-            else:
-                title_text = (
-                    f"{title_prefix} | ROI {float(panel['requested_roi_size_lamD']):.2f} -> {roi_size:.2f}"
-                )
-            ax.set_title(title_text, fontsize=8, pad=6)
-            ax.set_xlabel("x [λ/D]")
-            ax.set_ylabel("y [λ/D]")
+                if poster_figure:
+                    ax.text(
+                        0.03,
+                        0.97,
+                        f"{str(snr_label)} = {float(panel[snr_key]):.3e}",
+                        transform=ax.transAxes,
+                        ha="left",
+                        va="top",
+                        fontsize=map_subtitle_size,
+                        fontweight="bold",
+                        color="white",
+                        bbox=dict(boxstyle="round,pad=0.22", facecolor="black", edgecolor="white", linewidth=1.4, alpha=0.88),
+                    )
+                else:
+                    ax.text(
+                        0.5,
+                        1.01,
+                        f"{str(snr_label)} = {float(panel[snr_key]):.3e}",
+                        transform=ax.transAxes,
+                        ha="center",
+                        va="bottom",
+                        fontsize=map_subtitle_size,
+                        fontweight="semibold" if poster_figure else None,
+                    )
+            if not poster_figure:
+                ax.set_xlabel("x [λ/D]", fontsize=axis_label_size)
+                ax.set_ylabel("y [λ/D]", fontsize=axis_label_size)
+            ax.set_xlim(extent[0], extent[1])
+            ax.set_ylim(extent[2], extent[3])
+            ax.set_aspect("equal")
+            ax.tick_params(axis="both", labelsize=tick_label_size, width=spine_linewidth, length=6 if poster_figure else 3.5)
+            if poster_figure:
+                row_idx = idx // ncols
+                col_idx = idx % ncols
+                if row_idx < nrows_maps - 1:
+                    ax.tick_params(axis="x", labelbottom=False)
+                if col_idx > 0:
+                    ax.tick_params(axis="y", labelleft=False)
+            for spine in ax.spines.values():
+                spine.set_linewidth(spine_linewidth)
+                if poster_figure:
+                    spine.set_alpha(0.0)
+            if poster_figure:
+                poster_colorbar_image = im
+                poster_colorbar_label = cbar_label
         for idx in range(n_panels, nrows_maps * ncols):
-            ax_unused = fig.add_subplot(gs[idx // ncols, idx % ncols])
+            subplot_kwargs = {}
+            if first_ax is not None:
+                subplot_kwargs["sharex"] = first_ax
+                subplot_kwargs["sharey"] = first_ax
+            ax_unused = fig.add_subplot(gs[idx // ncols, idx % ncols], **subplot_kwargs)
             ax_unused.axis("off")
 
-        bottom_gs = gs[nrows_maps, :].subgridspec(1, 1)
-        ax_curve = fig.add_subplot(bottom_gs[0, 0])
-        requested_roi = np.asarray([float(panel["requested_roi_size_lamD"]) for panel in panels_sorted], dtype=float)
-        resolved_roi = np.asarray([float(panel["resolved_roi_size_lamD"]) for panel in panels_sorted], dtype=float)
-        snr_vals = np.asarray([float(panel[curve_snr_key]) for panel in panels_sorted], dtype=float)
-        ax_curve.plot(requested_roi, snr_vals, "-o", lw=1.8, ms=4.8, color="tab:blue", label=str(curve_snr_label))
-        ax_curve.set_xlabel("requested ROI size [λ/D]")
-        ax_curve.set_ylabel(str(curve_snr_label), color="tab:blue")
-        ax_curve.tick_params(axis="y", labelcolor="tab:blue")
-        ax_curve.grid(alpha=0.3)
-        if curve_snr_ylim is not None:
-            ax_curve.set_ylim(*curve_snr_ylim)
-        if np.any(np.abs(resolved_roi - requested_roi) > 1e-12):
-            ax_resolved = ax_curve.twinx()
-            ax_resolved.plot(requested_roi, resolved_roi, "--s", lw=1.4, ms=4.0, color="tab:orange", label="Resolved ROI")
-            ax_resolved.set_ylabel("resolved ROI size [λ/D]", color="tab:orange")
-            ax_resolved.tick_params(axis="y", labelcolor="tab:orange")
-        title_bits = []
-        first_panel = panels_sorted[0]
-        if "planet_radius_lamD" in first_panel and "planet_theta_deg" in first_panel:
-            title_bits.append(
-                f"Planet location: r={float(first_panel['planet_radius_lamD']):.3f} λ/D, "
-                f"theta={float(first_panel['planet_theta_deg']):.1f} deg"
+        if poster_figure and poster_colorbar_image is not None and poster_colorbar_label is not None:
+            fig.subplots_adjust(left=0.055, right=0.88, bottom=0.06, top=0.97, wspace=0.06, hspace=0.08)
+            fig.supxlabel("x [λ/D]", fontsize=axis_label_size, fontweight="bold")
+            fig.supylabel("y [λ/D]", fontsize=axis_label_size, fontweight="bold")
+            cbar = fig.colorbar(
+                poster_colorbar_image,
+                ax=fig.axes,
+                fraction=0.028,
+                pad=0.025,
             )
-        title_bits.append(
-            f"xy=({float(first_panel['planet_center_lamD'][0]):+.3f}, {float(first_panel['planet_center_lamD'][1]):+.3f})"
-        )
-        ax_curve.set_title(f"{curve_snr_label} vs ROI size | " + " | ".join(title_bits))
+            cbar.set_label(poster_colorbar_label, fontsize=axis_label_size)
+            cbar.ax.tick_params(labelsize=tick_label_size, width=spine_linewidth, length=5)
+            cbar.outline.set_linewidth(spine_linewidth)
+            cbar.ax.set_facecolor((0.0, 0.0, 0.0, 0.0))
 
-        pdf.savefig(fig)
+        if not poster_figure:
+            bottom_gs = gs[nrows_maps, :].subgridspec(1, 1)
+            ax_curve = fig.add_subplot(bottom_gs[0, 0])
+            requested_roi = np.asarray([float(panel["requested_roi_size_lamD"]) for panel in panels_sorted], dtype=float)
+            resolved_roi = np.asarray([float(panel["resolved_roi_size_lamD"]) for panel in panels_sorted], dtype=float)
+            snr_vals = np.asarray([float(panel[curve_snr_key]) for panel in panels_sorted], dtype=float)
+            ax_curve.plot(requested_roi, snr_vals, "-o", lw=1.8, ms=4.8, color="tab:blue", label=str(curve_snr_label))
+            ax_curve.set_xlabel("requested ROI size [λ/D]")
+            ax_curve.set_ylabel(str(curve_snr_label), color="tab:blue")
+            ax_curve.tick_params(axis="y", labelcolor="tab:blue")
+            ax_curve.grid(alpha=0.3)
+            if curve_snr_ylim is not None:
+                ax_curve.set_ylim(*curve_snr_ylim)
+            if np.any(np.abs(resolved_roi - requested_roi) > 1e-12):
+                ax_resolved = ax_curve.twinx()
+                ax_resolved.plot(requested_roi, resolved_roi, "--s", lw=1.4, ms=4.0, color="tab:orange", label="Resolved ROI")
+                ax_resolved.set_ylabel("resolved ROI size [λ/D]", color="tab:orange")
+                ax_resolved.tick_params(axis="y", labelcolor="tab:orange")
+            title_bits = []
+            if "planet_radius_lamD" in first_panel and "planet_theta_deg" in first_panel:
+                title_bits.append(
+                    f"Planet location: r={float(first_panel['planet_radius_lamD']):.3f} λ/D, "
+                    f"theta={float(first_panel['planet_theta_deg']):.1f} deg"
+                )
+            title_bits.append(
+                f"xy=({float(first_panel['planet_center_lamD'][0]):+.3f}, {float(first_panel['planet_center_lamD'][1]):+.3f})"
+            )
+            ax_curve.set_title(f"{curve_snr_label} vs ROI size | " + " | ".join(title_bits))
+
+        pdf.savefig(fig, transparent=poster_figure)
         plt.close(fig)
 
         if include_mean_map_page:
@@ -1182,6 +1310,7 @@ def _run_planet_position_roi_size_sweep(
     ghost_suffix: str,
 ) -> None:
     os.makedirs(sweep_output_dir, exist_ok=True)
+    poster_figure = bool(getattr(args, "plot_poster_figure", False))
     region_shape_name = normalize_region_shape(args.region_shape)
     radius_vals = _inclusive_float_range(
         args.planet_position_radius_min,
@@ -1273,6 +1402,7 @@ def _run_planet_position_roi_size_sweep(
                     region_shape_name=region_shape_name,
                     panels=panels,
                     extent=extent,
+                    poster_figure=poster_figure,
                 )
                 location_coh_pdf = os.path.join(
                     location_dir,
@@ -1285,56 +1415,58 @@ def _run_planet_position_roi_size_sweep(
                     region_shape_name=region_shape_name,
                     panels=panels,
                     extent=extent,
+                    poster_figure=poster_figure,
                 )
-                location_max_minus_coh_pdf = os.path.join(
-                    location_dir,
-                    "planet_position_roi_size_sweep_max_minus_coherence_maps_24lamD_"
-                    f"{location_tag}",
-                )
-                location_max_minus_coh_pdf = f"{location_max_minus_coh_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
-                _save_roi_size_max_minus_coherence_pdf_for_planet_location(
-                    output_path=location_max_minus_coh_pdf,
-                    region_shape_name=region_shape_name,
-                    panels=panels,
-                    extent=extent,
-                )
-                if str(incoherence_map_mode).strip().lower() == "lab_fft_ratio":
-                    location_fft_pdf = os.path.join(
+                if not poster_figure:
+                    location_max_minus_coh_pdf = os.path.join(
                         location_dir,
-                        "planet_position_roi_size_sweep_frequency_selection_spectra_"
-                        f"{location_tag}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf",
+                        "planet_position_roi_size_sweep_max_minus_coherence_maps_24lamD_"
+                        f"{location_tag}",
                     )
-                    _save_roi_size_fft_spectra_pdf_for_planet_location(
-                        output_path=location_fft_pdf,
+                    location_max_minus_coh_pdf = f"{location_max_minus_coh_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
+                    _save_roi_size_max_minus_coherence_pdf_for_planet_location(
+                        output_path=location_max_minus_coh_pdf,
+                        region_shape_name=region_shape_name,
                         panels=panels,
+                        extent=extent,
                     )
-                location_csv = os.path.join(
-                    location_dir,
-                    "planet_position_roi_size_sweep_table_"
-                    f"{location_tag}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.csv",
-                )
-                with open(location_csv, "w", newline="", encoding="utf-8") as fh:
-                    writer = csv.DictWriter(
-                        fh,
-                        fieldnames=[
-                            "planet_x_lamD",
-                            "planet_y_lamD",
-                            "orbit_radius_lamD",
-                            "planet_theta_rad",
-                            "requested_roi_size_lamD",
-                            "resolved_roi_size_lamD",
-                            "n_circles",
-                            "planet_peak",
-                            "planet_std",
-                            "background_aperture_std",
-                            "raw_snr",
-                            "snr",
-                            "background_aperture_mean",
-                            "background_aperture_std_centered",
-                        ],
+                    if str(incoherence_map_mode).strip().lower() == "lab_fft_ratio":
+                        location_fft_pdf = os.path.join(
+                            location_dir,
+                            "planet_position_roi_size_sweep_frequency_selection_spectra_"
+                            f"{location_tag}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf",
+                        )
+                        _save_roi_size_fft_spectra_pdf_for_planet_location(
+                            output_path=location_fft_pdf,
+                            panels=panels,
+                        )
+                    location_csv = os.path.join(
+                        location_dir,
+                        "planet_position_roi_size_sweep_table_"
+                        f"{location_tag}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.csv",
                     )
-                    writer.writeheader()
-                    writer.writerows(sample_rows)
+                    with open(location_csv, "w", newline="", encoding="utf-8") as fh:
+                        writer = csv.DictWriter(
+                            fh,
+                            fieldnames=[
+                                "planet_x_lamD",
+                                "planet_y_lamD",
+                                "orbit_radius_lamD",
+                                "planet_theta_rad",
+                                "requested_roi_size_lamD",
+                                "resolved_roi_size_lamD",
+                                "n_circles",
+                                "planet_peak",
+                                "planet_std",
+                                "background_aperture_std",
+                                "raw_snr",
+                                "snr",
+                                "background_aperture_mean",
+                                "background_aperture_std_centered",
+                            ],
+                        )
+                        writer.writeheader()
+                        writer.writerows(sample_rows)
             if best_entry is not None:
                 print(
                     "[planet-roi-polar] "
@@ -1344,221 +1476,49 @@ def _run_planet_position_roi_size_sweep(
                     f"best_roi={float(best_entry['resolved_roi_size_lamD']):.3f} λ/D"
                 )
 
-    out_csv = os.path.join(
-        sweep_output_dir,
-        "planet_position_roi_size_sweep_table_"
-        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{ghost_suffix}.csv",
-    )
-    with open(out_csv, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(
-            fh,
-            fieldnames=[
-                "planet_x_lamD",
-                "planet_y_lamD",
-                "orbit_radius_lamD",
-                "planet_theta_rad",
-                "requested_roi_size_lamD",
-                "resolved_roi_size_lamD",
-                "n_circles",
-                "planet_peak",
-                "planet_std",
-                "background_aperture_std",
-                "raw_snr",
-                "snr",
-                "background_aperture_mean",
-                "background_aperture_std_centered",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-    out_snr_summary_pdf = os.path.join(
-        sweep_output_dir,
-        "planet_position_roi_size_sweep_snr_summary_"
-        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{ghost_suffix}.pdf",
-    )
-    _save_planet_position_snr_summary_pdf(
-        output_path=out_snr_summary_pdf,
-        location_panels=location_panels,
-    )
-
-    print(f"Saved planet-position/ROI-size sweep table: {out_csv}")
-    print(f"Saved planet-position/ROI-size sweep SNR summary PDF: {out_snr_summary_pdf}")
-
-
-def _run_planet_diagonal_roi_size_sweep(
-    args: argparse.Namespace,
-    sim_local: dict,
-    incoherence_map_mode: str,
-    sweep_output_dir: str,
-    mask_output_tag: str,
-    phase_cycles_tag: str,
-    phase_sweep_mode_tag: str,
-    single_region_tag: str,
-    ghost_suffix: str,
-) -> None:
-    os.makedirs(sweep_output_dir, exist_ok=True)
-    region_shape_name = normalize_region_shape(args.region_shape)
-    diag_vals = _inclusive_float_range(args.planet_diagonal_t_min, args.planet_diagonal_t_max, args.planet_diagonal_t_step)
-    roi_sizes = _inclusive_float_range(args.roi_size_min, args.roi_size_max, args.roi_size_step)
-    y_sign = -1.0 if str(getattr(args, "planet_diagonal_mode", "anti")).strip().lower() == "anti" else 1.0
-
-    base = CoronagraphSimulator(**sim_local).run()
-    n_fft = int(base["n_fft"])
-    samp = float(base["focal_sampling"])
-    central_box_lamD = 24.0
-    half16 = int(0.5 * central_box_lamD * samp)
-    cc16 = n_fft // 2
-    sl16 = slice(cc16 - half16, cc16 + half16)
-    x16 = np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, 2 * half16, endpoint=False)
-    y16 = np.linspace(-0.5 * central_box_lamD, 0.5 * central_box_lamD, 2 * half16, endpoint=False)
-    xx16, yy16 = np.meshgrid(x16, y16)
-    extent = [-0.5 * central_box_lamD, 0.5 * central_box_lamD, -0.5 * central_box_lamD, 0.5 * central_box_lamD]
-    phase_offsets = np.linspace(0.0, 2.0 * np.pi * float(args.phase_cycles), int(args.phase_step), endpoint=True)
-
-    rows: list[dict[str, float | int]] = []
-    best_rows: list[dict[str, float | int]] = []
-    sampled_planet_centers: list[tuple[float, float]] = []
-    for t_val in diag_vals:
-        planet_center = (float(t_val), float(y_sign * float(t_val)))
-        if float(np.hypot(*planet_center)) <= 0.0:
-            print(f"[planet-roi-diag] skipping t={float(t_val):+.3f} because orbit radius is zero")
-            continue
-        sampled_planet_centers.append(planet_center)
-        sample_rows, best_entry, panels = _evaluate_best_roi_for_planet_center(
-            planet_center=planet_center,
-            roi_sizes=roi_sizes,
-            region_shape_name=region_shape_name,
-            sim_local=sim_local,
-            phase_offsets=phase_offsets,
-            sl16=sl16,
-            half16=half16,
-            xx16=xx16,
-            yy16=yy16,
-            incoherence_map_mode=incoherence_map_mode,
-            collect_panels=True,
-        )
-        for row in sample_rows:
-            row["diagonal_t_lamD"] = float(t_val)
-            row["diagonal_mode"] = str(getattr(args, "planet_diagonal_mode", "anti")).strip().lower()
-        rows.extend(sample_rows)
-        if len(panels) > 0:
-            location_pdf = os.path.join(
-                sweep_output_dir,
-                "planet_diagonal_roi_size_sweep_incoherence_maps_with_snr_"
-                f"t_{float(t_val):+.3f}_planet_x_{planet_center[0]:+.3f}_planet_y_{planet_center[1]:+.3f}".replace(".", "p").replace("+", ""),
-            )
-            location_pdf = f"{location_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.pdf"
-            _save_roi_size_incoherence_pdf_for_planet_location(
-                output_path=location_pdf,
-                region_shape_name=region_shape_name,
-                panels=panels,
-                extent=extent,
-            )
-        if best_entry is not None:
-            best_entry = dict(best_entry)
-            best_entry["diagonal_t_lamD"] = float(t_val)
-            best_entry["diagonal_mode"] = str(getattr(args, "planet_diagonal_mode", "anti")).strip().lower()
-            best_rows.append(best_entry)
-            print(
-                "[planet-roi-diag] "
-                f"t={float(t_val):+.3f} planet=({planet_center[0]:+.3f}, {planet_center[1]:+.3f}) "
-                f"best_snr={float(best_entry['snr']):.6e} best_roi={float(best_entry['resolved_roi_size_lamD']):.3f} λ/D"
-            )
-
-    diag_mode = str(getattr(args, "planet_diagonal_mode", "anti")).strip().lower()
-    diag_tag = (
-        f"_{diag_mode}_t_{float(args.planet_diagonal_t_min):.3f}_{float(args.planet_diagonal_t_max):.3f}_{float(args.planet_diagonal_t_step):.3f}"
-        .replace(".", "p")
-    )
-    roi_tag = (
-        f"_rmin_{float(args.roi_size_min):.3f}_rmax_{float(args.roi_size_max):.3f}_rstep_{float(args.roi_size_step):.3f}"
-        .replace(".", "p")
-    )
-    out_csv = os.path.join(
-        sweep_output_dir,
-        "planet_diagonal_roi_size_sweep_table_"
-        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{diag_tag}{roi_tag}{ghost_suffix}.csv",
-    )
-    with open(out_csv, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(
-            fh,
-            fieldnames=[
-                "diagonal_t_lamD",
-                "diagonal_mode",
-                "planet_x_lamD",
-                "planet_y_lamD",
-                "orbit_radius_lamD",
-                "planet_theta_rad",
-                "requested_roi_size_lamD",
-                "resolved_roi_size_lamD",
-                "n_circles",
-                "planet_peak",
-                "background_aperture_std",
-                "snr",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-    if len(best_rows) > 0:
-        t_arr = np.asarray([float(row["diagonal_t_lamD"]) for row in best_rows], dtype=float)
-        snr_arr = np.asarray([float(row["snr"]) for row in best_rows], dtype=float)
-        roi_arr = np.asarray([float(row["resolved_roi_size_lamD"]) for row in best_rows], dtype=float)
-        peak_arr = np.asarray([float(row["planet_peak"]) for row in best_rows], dtype=float)
-        med_arr = np.asarray([float(row["background_aperture_std"]) for row in best_rows], dtype=float)
-
-        fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.6), constrained_layout=True)
-        axes[0].plot(t_arr, snr_arr, "-o", lw=1.8, ms=4.5, color="tab:blue")
-        axes[0].set_title("Best SNR Along Diagonal")
-        axes[0].set_xlabel("diagonal t [λ/D]")
-        axes[0].set_ylabel("SNR")
-        axes[0].grid(alpha=0.3)
-        axes[1].plot(t_arr, roi_arr, "-o", lw=1.8, ms=4.5, color="tab:orange")
-        axes[1].set_title("Best ROI Size Along Diagonal")
-        axes[1].set_xlabel("diagonal t [λ/D]")
-        axes[1].set_ylabel("resolved ROI size [λ/D]")
-        axes[1].grid(alpha=0.3)
-        out_summary = os.path.join(
+    if not poster_figure:
+        out_csv = os.path.join(
             sweep_output_dir,
-            "planet_diagonal_roi_size_sweep_summary_"
-            f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{diag_tag}{roi_tag}{ghost_suffix}.png",
+            "planet_position_roi_size_sweep_table_"
+            f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{ghost_suffix}.csv",
         )
-        fig.savefig(out_summary, dpi=170, bbox_inches="tight")
-        plt.close(fig)
+        with open(out_csv, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(
+                fh,
+                fieldnames=[
+                    "planet_x_lamD",
+                    "planet_y_lamD",
+                    "orbit_radius_lamD",
+                    "planet_theta_rad",
+                    "requested_roi_size_lamD",
+                    "resolved_roi_size_lamD",
+                    "n_circles",
+                    "planet_peak",
+                    "planet_std",
+                    "background_aperture_std",
+                    "raw_snr",
+                    "snr",
+                    "background_aperture_mean",
+                    "background_aperture_std_centered",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
 
-        fig_aux, axes_aux = plt.subplots(1, 2, figsize=(12.8, 5.6), constrained_layout=True)
-        axes_aux[0].plot(t_arr, peak_arr, "-o", lw=1.8, ms=4.5, color="tab:red")
-        axes_aux[0].set_title("Peak Incoherence at Best ROI")
-        axes_aux[0].set_xlabel("diagonal t [λ/D]")
-        axes_aux[0].set_ylabel("peak incoherence")
-        axes_aux[0].grid(alpha=0.3)
-        axes_aux[1].plot(t_arr, med_arr, "-o", lw=1.8, ms=4.5, color="tab:green")
-        axes_aux[1].set_title("Annulus Median at Best ROI")
-        axes_aux[1].set_xlabel("diagonal t [λ/D]")
-        axes_aux[1].set_ylabel("background ring std")
-        axes_aux[1].grid(alpha=0.3)
-        out_aux = os.path.join(
+        out_snr_summary_pdf = os.path.join(
             sweep_output_dir,
-            "planet_diagonal_roi_size_sweep_aux_"
-            f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{diag_tag}{roi_tag}{ghost_suffix}.png",
+            "planet_position_roi_size_sweep_snr_summary_"
+            f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{ghost_suffix}.pdf",
         )
-        fig_aux.savefig(out_aux, dpi=170, bbox_inches="tight")
-        plt.close(fig_aux)
-        print(f"Saved planet-diagonal/ROI-size sweep summary plot: {out_summary}")
-        print(f"Saved planet-diagonal/ROI-size sweep auxiliary plot: {out_aux}")
-    out_mean_psf = os.path.join(
-        sweep_output_dir,
-        "planet_diagonal_mean_final_psf_with_locations_"
-        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{diag_tag}{roi_tag}{ghost_suffix}.png",
-    )
-    _save_planet_locations_on_mean_final_psf(
-        output_path=out_mean_psf,
-        sim_local=sim_local,
-        planet_centers_lamD=sampled_planet_centers,
-    )
-    print(f"Saved planet locations on mean final PSF: {out_mean_psf}")
-    print(f"Saved planet-diagonal/ROI-size sweep table: {out_csv}")
+        _save_planet_position_snr_summary_pdf(
+            output_path=out_snr_summary_pdf,
+            location_panels=location_panels,
+        )
+
+        print(f"Saved planet-position/ROI-size sweep table: {out_csv}")
+        print(f"Saved planet-position/ROI-size sweep SNR summary PDF: {out_snr_summary_pdf}")
+    else:
+        print("Poster figure mode enabled: emitted coherence and incoherence PDFs only.")
 
 
 def _build_ring_probe_pixels(
@@ -2964,11 +2924,8 @@ def run_coc_planet_phase(
         raise ValueError("--phase-step must be >= 2.")
     if float(args.planet_flux_ratio_local) < 0.0:
         raise ValueError("--planet-flux-ratio-local must be >= 0.")
-    if sum(
-        int(bool(getattr(args, name, False)))
-        for name in ("roi_size_sweep", "planet_position_roi_size_sweep", "planet_diagonal_roi_size_sweep")
-    ) > 1:
-        raise ValueError("Enable at most one of --roi-size-sweep, --planet-position-roi-size-sweep, --planet-diagonal-roi-size-sweep.")
+    if sum(int(bool(getattr(args, name, False))) for name in ("roi_size_sweep", "planet_position_roi_size_sweep")) > 1:
+        raise ValueError("Enable at most one of --roi-size-sweep, --planet-position-roi-size-sweep.")
     if bool(getattr(args, "roi_size_sweep", False)):
         if float(args.roi_size_min) <= 0.0:
             raise ValueError("--roi-size-min must be > 0.")
@@ -3003,22 +2960,6 @@ def run_coc_planet_phase(
             and not np.isclose(float(args.planet_position_theta_min_deg), float(args.planet_position_theta_max_deg))
         ):
             raise ValueError("--planet-position-theta-step-deg must be > 0 unless --planet-position-theta-min-deg == --planet-position-theta-max-deg.")
-    if bool(getattr(args, "planet_diagonal_roi_size_sweep", False)):
-        if float(args.roi_size_min) <= 0.0:
-            raise ValueError("--roi-size-min must be > 0.")
-        if float(args.roi_size_max) < float(args.roi_size_min):
-            raise ValueError("--roi-size-max must be >= --roi-size-min.")
-        if float(args.roi_size_step) < 0.0 or (
-            float(args.roi_size_step) == 0.0 and not np.isclose(float(args.roi_size_min), float(args.roi_size_max))
-        ):
-            raise ValueError("--roi-size-step must be > 0 unless --roi-size-min == --roi-size-max.")
-        if float(args.planet_diagonal_t_max) < float(args.planet_diagonal_t_min):
-            raise ValueError("--planet-diagonal-t-max must be >= --planet-diagonal-t-min.")
-        if float(args.planet_diagonal_t_step) < 0.0 or (
-            float(args.planet_diagonal_t_step) == 0.0
-            and not np.isclose(float(args.planet_diagonal_t_min), float(args.planet_diagonal_t_max))
-        ):
-            raise ValueError("--planet-diagonal-t-step must be > 0 unless --planet-diagonal-t-min == --planet-diagonal-t-max.")
     if bool(getattr(args, "ring_rotation_sweep", False)):
         if region_shape_name != "ring_of_circle":
             raise ValueError("--ring-rotation-sweep requires --region-shape ring_of_circle.")
@@ -3178,24 +3119,6 @@ def run_coc_planet_phase(
             ghost_suffix=ghost_suffix,
         )
         print("Planet-position/ROI-size 2D sweep enabled: skipped standard outputs.")
-        return
-    if bool(getattr(args, "planet_diagonal_roi_size_sweep", False)):
-        sweep_folder = os.path.join(
-            coc_planet_ratio_dir_no_pov,
-            "planet_diagonal_roi_size_sweep",
-        )
-        _run_planet_diagonal_roi_size_sweep(
-            args=effective_args,
-            sim_local=sim_local,
-            incoherence_map_mode=str(getattr(effective_args, "incoherence_map_mode", "fft_band")),
-            sweep_output_dir=sweep_folder,
-            mask_output_tag=mask_output_tag,
-            phase_cycles_tag=phase_cycles_tag,
-            phase_sweep_mode_tag=phase_sweep_mode_tag,
-            single_region_tag=single_region_tag,
-            ghost_suffix=ghost_suffix,
-        )
-        print("Planet-diagonal/ROI-size sweep enabled: skipped standard outputs.")
         return
     if bool(getattr(args, "ring_rotation_sweep", False)):
         sweep_folder = os.path.join(

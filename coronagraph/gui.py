@@ -544,24 +544,6 @@ HTML = """<!doctype html>
     </div>
   </fieldset>
 
-  <fieldset>
-    <legend>Planet Diagonal + ROI Size Sweep</legend>
-    <div class="roi-sweep-wrap">
-      <div class="roi-sweep-toggle-row">
-        <div class="left">Enable Diagonal Sweep</div>
-        <label class="toggle-inline" id="label_planet_diagonal_roi_size_sweep"><input type="checkbox" id="planet_diagonal_roi_size_sweep" /> On</label>
-      </div>
-      <div id="planet_diagonal_roi_sweep_fields" class="roi-sweep-fields">
-        <div class="grid">
-          <div class="field"><label>Diagonal Mode</label><select id="planet_diagonal_mode"><option value="anti">x, -x</option><option value="main">x, x</option></select></div>
-          <div class="field"><label>Diagonal T Min</label><input id="planet_diagonal_t_min" value="0.5" /></div>
-          <div class="field"><label>Diagonal T Max</label><input id="planet_diagonal_t_max" value="4.0" /></div>
-          <div class="field"><label>Diagonal T Step</label><input id="planet_diagonal_t_step" value="0.5" /></div>
-        </div>
-      </div>
-    </div>
-  </fieldset>
-
   <div class="section-card">
   <h3 class="section-title">Run Options</h3>
   <div class="checks">
@@ -569,6 +551,7 @@ HTML = """<!doctype html>
     <label><input type="checkbox" id="disable_interference" /> Disable Interference</label>
     <label><input type="checkbox" id="disable_companion_ghost" /> Disable Companion Ghost</label>
     <label><input type="checkbox" id="build_map_per_fov" /> Build Map per FOV</label>
+    <label><input type="checkbox" id="plot_poster_figure" /> Plot Poster Figure</label>
   </div>
   </div>
 
@@ -597,9 +580,8 @@ const fields = [
   "planet_flux_ratio_local","roi_size_sweep","roi_size_min","roi_size_max","roi_size_step",
   "planet_position_roi_size_sweep","planet_position_radius_min","planet_position_radius_max","planet_position_radius_step",
   "planet_position_theta_min_deg","planet_position_theta_max_deg","planet_position_theta_step_deg",
-  "planet_diagonal_roi_size_sweep","planet_diagonal_mode","planet_diagonal_t_min","planet_diagonal_t_max","planet_diagonal_t_step",
   "disable_ghost","disable_interference",
-  "disable_companion_ghost","build_map_per_fov"
+  "disable_companion_ghost","build_map_per_fov","plot_poster_figure"
 ];
 
 function collect() {
@@ -665,12 +647,6 @@ function updateChoiceButtons() {
     if (posCb.checked) posLab.classList.add("is-on");
     else posLab.classList.remove("is-on");
   }
-  const diagLab = document.getElementById("label_planet_diagonal_roi_size_sweep");
-  const diagCb = document.getElementById("planet_diagonal_roi_size_sweep");
-  if (diagLab && diagCb) {
-    if (diagCb.checked) diagLab.classList.add("is-on");
-    else diagLab.classList.remove("is-on");
-  }
   const ringLab = document.getElementById("label_ring_of_circle_sweep");
   const ringCb = document.getElementById("enable_ring_of_circle_sweep");
   if (ringLab && ringCb) {
@@ -703,7 +679,16 @@ async function stopCmd() {
   await fetch("/api/stop", {method:"POST"});
   showToast("Termination requested", "ok");
 }
-function clearLog() { document.getElementById("log").value = ""; }
+async function clearLog() {
+  const r = await fetch("/api/clear-log", {method:"POST"});
+  const j = await r.json();
+  if (!j.ok) {
+    showToast(j.error || "Could not clear log", "error");
+    return;
+  }
+  document.getElementById("log").value = "";
+  showToast("Log cleared", "ok");
+}
 async function showHelp() {
   const r = await fetch("/api/help");
   const j = await r.json();
@@ -769,7 +754,6 @@ function makeSweepModesExclusive(changedId) {
   const sweepIds = [
     "roi_size_sweep",
     "planet_position_roi_size_sweep",
-    "planet_diagonal_roi_size_sweep",
   ];
   const changed = document.getElementById(changedId);
   if (!changed || !changed.checked) return;
@@ -800,7 +784,6 @@ async function tick() {
 
   const roiSweepEnabled = document.getElementById("roi_size_sweep").checked;
   const posRoiSweepEnabled = document.getElementById("planet_position_roi_size_sweep").checked;
-  const diagRoiSweepEnabled = document.getElementById("planet_diagonal_roi_size_sweep").checked;
   const regionShape = document.getElementById("region_shape").value;
   const isRing = regionShape === "ring";
   const isRingOfCircle = regionShape === "ring_of_circle";
@@ -819,7 +802,7 @@ async function tick() {
   if (fovCentersField) {
     fovCentersField.style.display = isRing ? "none" : "";
   }
-  document.getElementById("local_region_radius").disabled = roiSweepEnabled || posRoiSweepEnabled || diagRoiSweepEnabled;
+  document.getElementById("local_region_radius").disabled = roiSweepEnabled || posRoiSweepEnabled;
   setFieldDisabled(
     "fov_count",
     isRingOfCircle,
@@ -851,11 +834,8 @@ async function tick() {
     !isRingOfCircle ? "Used only for ring_of_circle." : (!ringRotationSweepEnabled ? "Enable Rotation Sweep to use this." : ""),
   );
   const posRoiFields = document.getElementById("planet_position_roi_sweep_fields");
-  if (roiSweepEnabled || posRoiSweepEnabled || diagRoiSweepEnabled) posRoiFields.classList.remove("is-hidden");
+  if (roiSweepEnabled || posRoiSweepEnabled) posRoiFields.classList.remove("is-hidden");
   else posRoiFields.classList.add("is-hidden");
-  const diagRoiFields = document.getElementById("planet_diagonal_roi_sweep_fields");
-  if (diagRoiSweepEnabled) diagRoiFields.classList.remove("is-hidden");
-  else diagRoiFields.classList.add("is-hidden");
   setMaskVisibility();
   setSpiderVisibility();
   updateChoiceButtons();
@@ -865,7 +845,6 @@ document.getElementById("phase_mask_type").addEventListener("change", setMaskVis
 document.getElementById("spiders_enabled").addEventListener("change", tick);
 document.getElementById("roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("roi_size_sweep"); tick(); });
 document.getElementById("planet_position_roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_position_roi_size_sweep"); tick(); });
-document.getElementById("planet_diagonal_roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_diagonal_roi_size_sweep"); tick(); });
 document.getElementById("region_shape").addEventListener("change", tick);
 document.getElementById("enable_ring_of_circle_sweep").addEventListener("change", tick);
 document.getElementById("enable_ring_rotation_sweep").addEventListener("change", tick);
@@ -917,6 +896,10 @@ class Runner:
         with self.lock:
             return "".join(self.log)
 
+    def clear_log(self) -> None:
+        with self.lock:
+            self.log.clear()
+
     def build_cmd(self, payload: dict) -> list[str]:
         cmd = [sys.executable, "-m", "coronagraph.cli", "--feature", "coc-planet-phase"]
         args_map = {
@@ -949,10 +932,6 @@ class Runner:
             "planet_position_theta_min_deg": "--planet-position-theta-min-deg",
             "planet_position_theta_max_deg": "--planet-position-theta-max-deg",
             "planet_position_theta_step_deg": "--planet-position-theta-step-deg",
-            "planet_diagonal_mode": "--planet-diagonal-mode",
-            "planet_diagonal_t_min": "--planet-diagonal-t-min",
-            "planet_diagonal_t_max": "--planet-diagonal-t-max",
-            "planet_diagonal_t_step": "--planet-diagonal-t-step",
         }
         for key, flag in args_map.items():
             value = payload.get(key, "")
@@ -982,8 +961,6 @@ class Runner:
             cmd.append("--roi-size-sweep")
         if bool(payload.get("planet_position_roi_size_sweep", False)):
             cmd.append("--planet-position-roi-size-sweep")
-        if bool(payload.get("planet_diagonal_roi_size_sweep", False)):
-            cmd.append("--planet-diagonal-roi-size-sweep")
         if bool(payload.get("enable_ring_rotation_sweep", False)):
             cmd.append("--ring-rotation-sweep")
 
@@ -1000,6 +977,7 @@ class Runner:
             ("disable_interference", "--disable-interference"),
             ("disable_companion_ghost", "--disable-companion-ghost"),
             ("build_map_per_fov", "--build-map-per-fov"),
+            ("plot_poster_figure", "--plot-poster-figure"),
         ]:
             if bool(payload.get(key, False)):
                 cmd.append(flag)
@@ -1098,6 +1076,10 @@ def main() -> None:
                 return
             if self.path == "/api/stop":
                 runner.stop()
+                _json_response(self, {"ok": True})
+                return
+            if self.path == "/api/clear-log":
+                runner.clear_log()
                 _json_response(self, {"ok": True})
                 return
             if self.path == "/api/shutdown":
