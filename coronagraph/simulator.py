@@ -76,8 +76,15 @@ class CoronagraphSimulator:
     include_companion_ghost : bool
         If False, ghost and companion self-interference are disabled only for the
         companion branch, while the stellar branch keeps the global ghost settings.
+    coherent_ring_speckle_count : int
+        Number of extra coherent speckles placed on the same angular-separation ring
+        as the companion/planet, equally spaced in azimuth and amplitude-matched so
+        their incremental final science-PSF peak matches the companion peak in the
+        unmodulated baseline case.
     e_final_phase_offset : float
         Global phase offset (radians) applied on the first focal plane.
+    phase_mask_rotation_rad : float
+        Rigid rotation angle (radians) applied to the focal-plane phase-mask coordinates.
     focal_local_phase_offset : float
         Local phase offset (radians) applied inside selected first-focal-plane regions.
     focal_local_phase_centers_lamD : tuple[tuple[float, float], ...]
@@ -129,9 +136,11 @@ class CoronagraphSimulator:
         companion_flux_ratio: float = 0.0,
         companion_offset_lamD: tuple[float, float] = (0.0, 0.0),
         include_companion_ghost: bool = True,
+        coherent_ring_speckle_count: int = 0,
         source_amplitude: float = 1.0,
         normalization_peak: float | None = None,
         e_final_phase_offset: float = 0.0,
+        phase_mask_rotation_rad: float = 0.0,
         focal_local_phase_offset: float = 0.0,
         focal_local_phase_centers_lamD: tuple[tuple[float, float], ...] = (),
         focal_local_phase_shape: str = "circle",
@@ -145,6 +154,8 @@ class CoronagraphSimulator:
         pupil_supersample: int = 1,
         phase_screen_path: str | None = None,
         phase_screen_index: int = 0,
+        lyot_reference_scale: float = 1.0,
+        perfect_coronagraph: bool = False,
     ):
         self.pupil_pixels = int(pupil_pixels)
         self.focal_sampling = float(focal_sampling)
@@ -169,11 +180,13 @@ class CoronagraphSimulator:
         self.companion_flux_ratio = float(companion_flux_ratio)
         self.companion_offset_lamD = (float(companion_offset_lamD[0]), float(companion_offset_lamD[1]))
         self.include_companion_ghost = bool(include_companion_ghost)
+        self.coherent_ring_speckle_count = int(coherent_ring_speckle_count)
         self.source_amplitude = float(source_amplitude)
         self.normalization_peak = (
             None if normalization_peak is None else float(normalization_peak)
         )
         self.e_final_phase_offset = float(e_final_phase_offset)
+        self.phase_mask_rotation_rad = float(phase_mask_rotation_rad)
         self.focal_local_phase_offset = float(focal_local_phase_offset)
         self.focal_local_phase_centers_lamD = tuple(
             (float(x), float(y)) for x, y in focal_local_phase_centers_lamD
@@ -192,10 +205,14 @@ class CoronagraphSimulator:
         self.pupil_supersample = int(pupil_supersample)
         self.phase_screen_path = None if phase_screen_path is None else str(phase_screen_path)
         self.phase_screen_index = int(phase_screen_index)
+        self.lyot_reference_scale = float(lyot_reference_scale)
+        self.perfect_coronagraph = bool(perfect_coronagraph)
         if not (0.0 <= self.ghost_coherence <= 1.0):
             raise ValueError("ghost_coherence must be in [0, 1].")
         if self.companion_flux_ratio < 0.0:
             raise ValueError("companion_flux_ratio must be >= 0.")
+        if self.coherent_ring_speckle_count < 0:
+            raise ValueError("coherent_ring_speckle_count must be >= 0.")
         if self.source_amplitude < 0.0:
             raise ValueError("source_amplitude must be >= 0.")
         if self.normalization_peak is not None and self.normalization_peak <= 0.0:
@@ -208,6 +225,8 @@ class CoronagraphSimulator:
             raise ValueError("pupil_supersample must be >= 1.")
         if self.phase_screen_index < 0:
             raise ValueError("phase_screen_index must be >= 0.")
+        if self.lyot_reference_scale < 0.0:
+            raise ValueError("lyot_reference_scale must be >= 0.")
         if self.focal_local_phase_radius_lamD < 0.0:
             raise ValueError("focal_local_phase_radius_lamD must be >= 0.")
         if self.focal_local_phase_shape not in {"circle", "ring"}:
@@ -416,6 +435,7 @@ class CoronagraphSimulator:
             self.n_fft,
             self.focal_sampling,
             self.phase_mask_sampling,
+            self.phase_mask_rotation_rad,
             self._phase_mask_signature(self.phase_mask),
         )
         cached = self._PHASE_MASK_CACHE.get(cache_key)
@@ -424,15 +444,23 @@ class CoronagraphSimulator:
 
         x_lamD = self._x / self.focal_sampling
         y_lamD = self._y / self.focal_sampling
+        if not np.isclose(self.phase_mask_rotation_rad, 0.0):
+            cos_a = float(np.cos(self.phase_mask_rotation_rad))
+            sin_a = float(np.sin(self.phase_mask_rotation_rad))
+            x_eval = cos_a * x_lamD + sin_a * y_lamD
+            y_eval = -sin_a * x_lamD + cos_a * y_lamD
+        else:
+            x_eval = x_lamD
+            y_eval = y_lamD
 
         if np.isclose(self.phase_mask_sampling, self.focal_sampling):
-            sampled = self.phase_mask.transmission(x_lamD, y_lamD)
+            sampled = self.phase_mask.transmission(x_eval, y_eval)
             self._PHASE_MASK_CACHE[cache_key] = sampled
             return sampled
 
         # Pixelate the mask on its own sampling grid.
-        xq = np.round(x_lamD * self.phase_mask_sampling) / self.phase_mask_sampling
-        yq = np.round(y_lamD * self.phase_mask_sampling) / self.phase_mask_sampling
+        xq = np.round(x_eval * self.phase_mask_sampling) / self.phase_mask_sampling
+        yq = np.round(y_eval * self.phase_mask_sampling) / self.phase_mask_sampling
         sampled = self.phase_mask.transmission(xq, yq)
         self._PHASE_MASK_CACHE[cache_key] = sampled
         return sampled
@@ -578,11 +606,146 @@ class CoronagraphSimulator:
 
     def _apply_focal_shift_phase_ramp(self, e_pupil: np.ndarray) -> np.ndarray:
         """Apply focal-plane subpixel shift using a phase ramp in the entrance pupil."""
-        dx, dy = self.focal_shift_pixels
+        return self._apply_focal_shift_phase_ramp_with_shift(e_pupil, self.focal_shift_pixels)
+
+    def _apply_focal_shift_phase_ramp_with_shift(
+        self,
+        e_pupil: np.ndarray,
+        focal_shift_pixels: tuple[float, float],
+    ) -> np.ndarray:
+        """Apply focal-plane subpixel shift using a phase ramp in the entrance pupil."""
+        dx, dy = float(focal_shift_pixels[0]), float(focal_shift_pixels[1])
         if np.isclose(dx, 0.0) and np.isclose(dy, 0.0):
             return e_pupil
         phase_ramp = np.exp(-1j * 2.0 * np.pi * (dx * self._x + dy * self._y) / self.n_fft)
         return e_pupil * phase_ramp
+
+    def _run_single_branch(
+        self,
+        *,
+        focal_shift_pixels: tuple[float, float] | None = None,
+        source_amplitude: float | None = None,
+        normalization_peak: float | None = None,
+        phase_screen_enabled: bool = True,
+        lyot_reference_field: np.ndarray | None = None,
+        apply_focal_plane_modulation: bool = True,
+    ) -> dict:
+        """Propagate one coherent source branch through the coronagraph."""
+        use_shift = self.focal_shift_pixels if focal_shift_pixels is None else focal_shift_pixels
+        use_amplitude = self.source_amplitude if source_amplitude is None else float(source_amplitude)
+
+        entrance_pupil = self.entrance_pupil()
+        e_pupil = use_amplitude * entrance_pupil.astype(np.complex128)
+        if phase_screen_enabled:
+            pupil_phase_screen = self._pupil_phase_screen_map()
+        else:
+            pupil_phase_screen = np.zeros((self.n_fft, self.n_fft), dtype=float)
+        e_pupil *= np.exp(1j * pupil_phase_screen)
+        e_pupil = self._apply_focal_shift_phase_ramp_with_shift(e_pupil, use_shift)
+
+        e_focal_before_mask = self._centered_fft2(e_pupil)
+
+        mask = self._sampled_phase_mask()
+        if apply_focal_plane_modulation:
+            local_focal_phase = self._local_focal_phase_map()
+            focal_plane_phase_offset = self.e_final_phase_offset
+        else:
+            local_focal_phase = np.zeros((self.n_fft, self.n_fft), dtype=float)
+            focal_plane_phase_offset = 0.0
+        e_focal_after_mask = (
+            e_focal_before_mask
+            * (1 - np.sqrt(self.ghost_fraction))
+            * mask
+            * np.exp(-1j * (focal_plane_phase_offset + local_focal_phase))
+        )
+
+        e_lyot_raw = self._centered_ifft2(e_focal_after_mask)
+        if lyot_reference_field is None:
+            lyot_reference = np.zeros_like(e_lyot_raw)
+        else:
+            lyot_reference = self.lyot_reference_scale * np.asarray(
+                lyot_reference_field,
+                dtype=np.complex128,
+            )
+        e_lyot = e_lyot_raw - lyot_reference
+
+        lyot_stop = self._lyot_stop()
+        e_lyot_stopped = e_lyot * lyot_stop
+
+        e_final = self._centered_fft2(e_lyot_stopped)
+
+        i_direct = np.abs(e_focal_before_mask) ** 2
+        i_coron = np.abs(e_final) ** 2
+
+        norm = np.max(i_direct) if normalization_peak is None else float(normalization_peak)
+        e_direct_norm = e_focal_before_mask / np.sqrt(norm)
+        e_coron_norm = e_final / np.sqrt(norm)
+        i_direct = np.abs(e_direct_norm) ** 2
+        i_coron = np.abs(e_coron_norm) ** 2
+
+        if self.include_ghost:
+            amp_scale = np.sqrt(self.ghost_fraction)
+        else:
+            amp_scale = 0.0
+
+        if self.ghost_source == "direct":
+            ghost_seed_field = amp_scale * e_direct_norm
+        elif self.ghost_source == "coronagraphic":
+            ghost_seed_field = amp_scale * e_coron_norm
+        else:
+            e_ghost_focal_from_mask = amp_scale * e_focal_before_mask
+            e_ghost_lyot = self._centered_ifft2(e_ghost_focal_from_mask)
+            e_ghost_lyot_stopped = e_ghost_lyot * lyot_stop
+            e_ghost_final = self._centered_fft2(e_ghost_lyot_stopped)
+            ghost_seed_field = e_ghost_final / np.sqrt(norm)
+        ghost_offset_is_zero = (
+            np.isclose(self.ghost_offset_lamD[0], 0.0)
+            and np.isclose(self.ghost_offset_lamD[1], 0.0)
+        )
+        if ghost_offset_is_zero:
+            dx_pix = float(use_shift[0])
+            dy_pix = float(use_shift[1])
+        else:
+            dx_pix = float(self.ghost_offset_lamD[0] * self.focal_sampling)
+            dy_pix = float(self.ghost_offset_lamD[1] * self.focal_sampling)
+        ghost_field = (
+            self._shift_complex_subpixel(ghost_seed_field, dx_pix=dx_pix, dy_pix=dy_pix)
+            * np.exp(1j * self.ghost_phase_rad)
+        )
+        ghost_psf = np.abs(ghost_field) ** 2
+
+        i_final_no_interference = i_coron + ghost_psf
+        if self.include_ghost and self.include_interference:
+            interference_term = 2.0 * np.real(
+                self.ghost_coherence * e_coron_norm * np.conj(ghost_field)
+            )
+        else:
+            interference_term = np.zeros_like(i_coron)
+        i_final_with_ghost = i_final_no_interference + interference_term
+        ghost_only_no_interference = ghost_psf
+        ghost_only_with_interference = ghost_psf + interference_term
+
+        return {
+            "entrance_pupil": entrance_pupil,
+            "pupil_phase_screen": pupil_phase_screen,
+            "mask": mask,
+            "lyot_field_before_reference_subtraction": e_lyot_raw,
+            "lyot_reference_field": lyot_reference,
+            "lyot_field": e_lyot,
+            "lyot_stop": lyot_stop,
+            "direct_psf": i_direct,
+            "direct_field": e_direct_norm,
+            "coronagraphic_psf": i_coron,
+            "coronagraphic_field": e_coron_norm,
+            "ghost_field": ghost_field,
+            "ghost_psf": ghost_psf,
+            "ghost_only_no_interference": ghost_only_no_interference,
+            "ghost_only_with_interference": ghost_only_with_interference,
+            "interference_term": interference_term,
+            "final_psf_no_interference": i_final_no_interference,
+            "final_psf_with_ghost": i_final_with_ghost,
+            "normalization_peak": norm,
+        }
 
     def _single_source_result_for_shift(
         self,
@@ -615,9 +778,11 @@ class CoronagraphSimulator:
             companion_flux_ratio=0.0,
             companion_offset_lamD=(0.0, 0.0),
             include_companion_ghost=self.include_companion_ghost,
+            coherent_ring_speckle_count=0,
             source_amplitude=source_amplitude,
             normalization_peak=normalization_peak,
             e_final_phase_offset=self.e_final_phase_offset,
+            phase_mask_rotation_rad=self.phase_mask_rotation_rad,
             focal_local_phase_offset=self.focal_local_phase_offset,
             focal_local_phase_centers_lamD=self.focal_local_phase_centers_lamD,
             focal_local_phase_shape=self.focal_local_phase_shape,
@@ -631,8 +796,132 @@ class CoronagraphSimulator:
             pupil_supersample=self.pupil_supersample,
             phase_screen_path=self.phase_screen_path,
             phase_screen_index=self.phase_screen_index,
+            lyot_reference_scale=self.lyot_reference_scale,
+            perfect_coronagraph=False,
         )
         return clone.run()
+
+    def _coherent_ring_speckle_offsets_lamD(self) -> list[tuple[float, float]]:
+        if self.coherent_ring_speckle_count <= 0 or self.companion_flux_ratio <= 0.0:
+            return []
+        radius = float(np.hypot(self.companion_offset_lamD[0], self.companion_offset_lamD[1]))
+        if np.isclose(radius, 0.0):
+            return []
+        base_theta = float(np.arctan2(self.companion_offset_lamD[1], self.companion_offset_lamD[0]))
+        n_total = int(self.coherent_ring_speckle_count) + 1
+        offsets: list[tuple[float, float]] = []
+        for k in range(1, n_total):
+            theta = base_theta + 2.0 * np.pi * float(k) / float(n_total)
+            offsets.append((float(radius * np.cos(theta)), float(radius * np.sin(theta))))
+        return offsets
+
+    def _lamD_aperture_mask(
+        self,
+        center_lamD: tuple[float, float],
+        radius_lamD: float = 0.5,
+    ) -> np.ndarray:
+        xx = self._x / self.focal_sampling
+        yy = self._y / self.focal_sampling
+        return (
+            (xx - float(center_lamD[0])) ** 2 + (yy - float(center_lamD[1])) ** 2
+            <= float(radius_lamD) ** 2
+        )
+
+    @staticmethod
+    def _quadratic_delta_intensity(
+        base_coron_field: np.ndarray,
+        base_ghost_field: np.ndarray,
+        delta_coron_field_unit: np.ndarray,
+        delta_ghost_field_unit: np.ndarray,
+        gamma: float,
+        amplitude: float,
+    ) -> np.ndarray:
+        """Return the incremental final-PSF intensity from adding one coherent branch."""
+        amp = float(amplitude)
+        if np.isclose(amp, 0.0):
+            return np.zeros(base_coron_field.shape, dtype=float)
+        base_cross = (
+            base_coron_field * np.conj(delta_coron_field_unit)
+            + base_ghost_field * np.conj(delta_ghost_field_unit)
+            + float(gamma) * delta_coron_field_unit * np.conj(base_ghost_field)
+            + float(gamma) * base_coron_field * np.conj(delta_ghost_field_unit)
+        )
+        unit_self = (
+            np.abs(delta_coron_field_unit) ** 2
+            + np.abs(delta_ghost_field_unit) ** 2
+            + 2.0 * np.real(float(gamma) * delta_coron_field_unit * np.conj(delta_ghost_field_unit))
+        )
+        return 2.0 * amp * np.real(base_cross) + (amp**2) * unit_self
+
+    def _match_coherent_speckle_amplitude(
+        self,
+        *,
+        speckle_offset_lamD: tuple[float, float],
+        base_coron_field: np.ndarray,
+        base_ghost_field: np.ndarray,
+        target_peak: float,
+        normalization_peak: float,
+        include_ghost: bool,
+        include_interference: bool,
+    ) -> tuple[float, dict]:
+        """
+        Calibrate one coherent speckle so its incremental science-PSF peak matches
+        the companion peak inside a 0.5 λ/D aperture at the requested location.
+        """
+        if target_peak <= 0.0:
+            return 0.0, {
+                "direct_field": np.zeros_like(base_coron_field),
+                "coronagraphic_field": np.zeros_like(base_coron_field),
+                "ghost_field": np.zeros_like(base_ghost_field),
+            }
+
+        speckle_shift = (
+            self.focal_shift_pixels[0] - float(speckle_offset_lamD[0]) * self.focal_sampling,
+            self.focal_shift_pixels[1] - float(speckle_offset_lamD[1]) * self.focal_sampling,
+        )
+        unit = self._single_source_result_for_shift(
+            speckle_shift,
+            include_ghost=include_ghost,
+            include_interference=include_interference,
+            source_amplitude=1.0,
+            normalization_peak=normalization_peak,
+        )
+        aperture_mask = self._lamD_aperture_mask(speckle_offset_lamD, radius_lamD=0.5)
+        if not np.any(aperture_mask):
+            return 0.0, unit
+
+        def aperture_peak_for_amplitude(amplitude: float) -> float:
+            delta = self._quadratic_delta_intensity(
+                base_coron_field=base_coron_field,
+                base_ghost_field=base_ghost_field,
+                delta_coron_field_unit=np.asarray(unit["coronagraphic_field"], dtype=np.complex128),
+                delta_ghost_field_unit=np.asarray(unit["ghost_field"], dtype=np.complex128),
+                gamma=self.ghost_coherence if (include_ghost and include_interference) else 0.0,
+                amplitude=amplitude,
+            )
+            return float(np.max(delta[aperture_mask]))
+
+        hi = 1.0
+        hi_peak = aperture_peak_for_amplitude(hi)
+        n_iter = 0
+        while hi_peak < target_peak and n_iter < 32:
+            hi *= 2.0
+            hi_peak = aperture_peak_for_amplitude(hi)
+            n_iter += 1
+
+        if hi_peak <= 0.0:
+            return 0.0, unit
+
+        lo = 0.0
+        for _ in range(48):
+            mid = 0.5 * (lo + hi)
+            mid_peak = aperture_peak_for_amplitude(mid)
+            if mid_peak >= target_peak:
+                hi = mid
+            else:
+                lo = mid
+        matched_amplitude = float(hi)
+        return matched_amplitude, unit
 
     @staticmethod
     def _shift_complex(field: np.ndarray, dx_pix: int, dy_pix: int) -> np.ndarray:
@@ -655,83 +944,107 @@ class CoronagraphSimulator:
         return shifted.astype(np.complex128, copy=False)
 
     def run(self) -> dict:
-        entrance_pupil = self.entrance_pupil()
-        e_pupil = self.source_amplitude * entrance_pupil.astype(np.complex128)
-        pupil_phase_screen = self._pupil_phase_screen_map()
-        e_pupil *= np.exp(1j * pupil_phase_screen)
-        e_pupil = self._apply_focal_shift_phase_ramp(e_pupil)
-
-        e_focal_before_mask = self._centered_fft2(e_pupil)
-
-        mask = self._sampled_phase_mask()
-        local_focal_phase = self._local_focal_phase_map()
-        e_focal_after_mask = (
-            e_focal_before_mask
-            * (1 - np.sqrt(self.ghost_fraction))
-            * mask
-            * np.exp(-1j * (self.e_final_phase_offset + local_focal_phase))
-        )
-
-        e_lyot = self._centered_ifft2(e_focal_after_mask)
-
-        lyot_stop = self._lyot_stop()
-        e_lyot_stopped = e_lyot * lyot_stop
-
-        e_final = self._centered_fft2(e_lyot_stopped)
-
-        i_direct = np.abs(e_focal_before_mask) ** 2
-        i_coron = np.abs(e_final) ** 2
-
-        if self.normalization_peak is not None:
-            norm = self.normalization_peak
-        else:
-            norm = np.max(i_direct)
-        e_direct_norm = e_focal_before_mask / np.sqrt(norm)
-        e_coron_norm = e_final / np.sqrt(norm)
-        i_direct = np.abs(e_direct_norm) ** 2
-        i_coron = np.abs(e_coron_norm) ** 2
-
-        if self.include_ghost:
-            amp_scale = np.sqrt(self.ghost_fraction)
-        else:
-            amp_scale = 0.0
-
-        if self.ghost_source == "direct":
-            ghost_seed_field = amp_scale * e_direct_norm
-        elif self.ghost_source == "coronagraphic":
-            ghost_seed_field = amp_scale * e_coron_norm
-        else:
-            e_ghost_focal_from_mask = amp_scale * e_focal_before_mask
-            e_ghost_lyot = self._centered_ifft2(e_ghost_focal_from_mask)
-            e_ghost_lyot_stopped = e_ghost_lyot * lyot_stop
-            e_ghost_final = self._centered_fft2(e_ghost_lyot_stopped)
-            ghost_seed_field = e_ghost_final / np.sqrt(norm)
-        ghost_offset_is_zero = (
-            np.isclose(self.ghost_offset_lamD[0], 0.0)
-            and np.isclose(self.ghost_offset_lamD[1], 0.0)
-        )
-        if ghost_offset_is_zero:
-            dx_pix = float(self.focal_shift_pixels[0])
-            dy_pix = float(self.focal_shift_pixels[1])
-        else:
-            dx_pix = float(self.ghost_offset_lamD[0] * self.focal_sampling)
-            dy_pix = float(self.ghost_offset_lamD[1] * self.focal_sampling)
-        ghost_field = (
-            self._shift_complex_subpixel(ghost_seed_field, dx_pix=dx_pix, dy_pix=dy_pix)
-            * np.exp(1j * self.ghost_phase_rad)
-        )
-        ghost_psf = np.abs(ghost_field) ** 2
-
-        i_final_no_interference = i_coron + ghost_psf
-        if self.include_ghost and self.include_interference:
-            interference_term = 2.0 * np.real(
-                self.ghost_coherence * e_coron_norm * np.conj(ghost_field)
+        lyot_reference_field = None
+        if self.perfect_coronagraph:
+            reference_branch = self._run_single_branch(
+                normalization_peak=self.normalization_peak,
+                phase_screen_enabled=False,
+                apply_focal_plane_modulation=False,
             )
+            lyot_reference_field = reference_branch["lyot_field_before_reference_subtraction"]
         else:
-            interference_term = np.zeros_like(i_coron)
-        i_final_with_ghost = i_final_no_interference + interference_term
-        ghost_only_no_interference = ghost_psf
-        ghost_only_with_interference = ghost_psf + interference_term
+            reference_branch = None
+
+        star = self._run_single_branch(
+            normalization_peak=self.normalization_peak,
+            phase_screen_enabled=True,
+            lyot_reference_field=lyot_reference_field,
+            apply_focal_plane_modulation=True,
+        )
+        entrance_pupil = star["entrance_pupil"]
+        pupil_phase_screen = star["pupil_phase_screen"]
+        mask = star["mask"]
+        e_lyot = star["lyot_field"]
+        lyot_stop = star["lyot_stop"]
+        i_direct = star["direct_psf"]
+        e_direct_norm = star["direct_field"]
+        i_coron = star["coronagraphic_psf"]
+        e_coron_norm = star["coronagraphic_field"]
+        ghost_field = star["ghost_field"]
+        ghost_psf = star["ghost_psf"]
+        ghost_only_no_interference = star["ghost_only_no_interference"]
+        ghost_only_with_interference = star["ghost_only_with_interference"]
+        interference_term = star["interference_term"]
+        i_final_no_interference = star["final_psf_no_interference"]
+        i_final_with_ghost = star["final_psf_with_ghost"]
+        norm = star["normalization_peak"]
+
+        coherent_speckle_offsets_lamD = self._coherent_ring_speckle_offsets_lamD()
+        coherent_speckle_source_amplitudes: list[float] = []
+        if coherent_speckle_offsets_lamD:
+            e_direct_coherent = np.array(e_direct_norm, copy=True)
+            e_coron_coherent = np.array(e_coron_norm, copy=True)
+            ghost_field_coherent = np.array(ghost_field, copy=True)
+            target_peak = 0.0
+            companion_present = self.companion_flux_ratio > 0.0
+            if companion_present:
+                comp_shift = (
+                    self.focal_shift_pixels[0] - self.companion_offset_lamD[0] * self.focal_sampling,
+                    self.focal_shift_pixels[1] - self.companion_offset_lamD[1] * self.focal_sampling,
+                )
+                companion_reference = self._single_source_result_for_shift(
+                    comp_shift,
+                    include_ghost=self.include_ghost and self.include_companion_ghost,
+                    include_interference=self.include_interference and self.include_companion_ghost,
+                    source_amplitude=np.sqrt(self.companion_flux_ratio),
+                    normalization_peak=norm,
+                )
+                companion_mask = self._lamD_aperture_mask(self.companion_offset_lamD, radius_lamD=0.5)
+                if np.any(companion_mask):
+                    target_peak = float(
+                        np.max(
+                            np.asarray(companion_reference["final_psf_with_ghost"], dtype=float)[
+                                companion_mask
+                            ]
+                        )
+                    )
+            for offset_lamD in coherent_speckle_offsets_lamD:
+                matched_amplitude, speckle_unit = self._match_coherent_speckle_amplitude(
+                    speckle_offset_lamD=offset_lamD,
+                    base_coron_field=e_coron_coherent,
+                    base_ghost_field=ghost_field_coherent,
+                    target_peak=target_peak,
+                    normalization_peak=norm,
+                    include_ghost=self.include_ghost and self.include_companion_ghost,
+                    include_interference=self.include_interference and self.include_companion_ghost,
+                )
+                coherent_speckle_source_amplitudes.append(matched_amplitude)
+                e_direct_coherent += matched_amplitude * np.asarray(
+                    speckle_unit["direct_field"], dtype=np.complex128
+                )
+                e_coron_coherent += matched_amplitude * np.asarray(
+                    speckle_unit["coronagraphic_field"], dtype=np.complex128
+                )
+                ghost_field_coherent += matched_amplitude * np.asarray(
+                    speckle_unit["ghost_field"], dtype=np.complex128
+                )
+
+            e_direct_norm = e_direct_coherent
+            e_coron_norm = e_coron_coherent
+            ghost_field = ghost_field_coherent
+            i_direct = np.abs(e_direct_norm) ** 2
+            i_coron = np.abs(e_coron_norm) ** 2
+            ghost_psf = np.abs(ghost_field) ** 2
+            i_final_no_interference = i_coron + ghost_psf
+            if self.include_ghost and self.include_interference:
+                interference_term = i_final_no_interference * 0.0 + 2.0 * np.real(
+                    self.ghost_coherence * e_coron_norm * np.conj(ghost_field)
+                )
+            else:
+                interference_term = np.zeros_like(i_coron)
+            i_final_with_ghost = i_final_no_interference + interference_term
+            ghost_only_no_interference = ghost_psf
+            ghost_only_with_interference = ghost_psf + interference_term
 
         r_pix = np.sqrt(self._x**2 + self._y**2)
         r_lamD_map = r_pix / self.focal_sampling
@@ -810,14 +1123,22 @@ class CoronagraphSimulator:
             "pupil_supersample": self.pupil_supersample,
             "phase_screen_path": self.phase_screen_path,
             "phase_screen_index": self.phase_screen_index,
+            "lyot_reference_scale": self.lyot_reference_scale,
+            "perfect_coronagraph": self.perfect_coronagraph,
             "companion_flux_ratio": self.companion_flux_ratio,
             "companion_offset_lamD": self.companion_offset_lamD,
             "include_companion_ghost": self.include_companion_ghost,
+            "coherent_ring_speckle_count": self.coherent_ring_speckle_count,
+            "coherent_ring_speckle_offsets_lamD": tuple(coherent_speckle_offsets_lamD),
+            "coherent_ring_speckle_source_amplitudes": tuple(coherent_speckle_source_amplitudes),
             "source_amplitude": self.source_amplitude,
             "normalization_peak": norm,
+            "phase_mask_rotation_rad": self.phase_mask_rotation_rad,
             "pupil": entrance_pupil,
             "pupil_phase_screen": pupil_phase_screen,
             "mask": mask,
+            "lyot_field_before_reference_subtraction": star["lyot_field_before_reference_subtraction"],
+            "lyot_reference_field": star["lyot_reference_field"],
             "lyot_field": e_lyot,
             "lyot_stop": lyot_stop,
             "direct_psf": i_direct_total,

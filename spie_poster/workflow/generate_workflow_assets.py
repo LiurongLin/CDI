@@ -6,6 +6,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from matplotlib.patches import Circle
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 
@@ -24,7 +26,7 @@ OUTPUT_DIR = Path(__file__).resolve().parent
 DPI = 180
 
 PLANET_CENTER_LAMD = (-7, 0)
-PLANET_FLUX_RATIO = 0.005
+PLANET_FLUX_RATIO = 0.0005
 PLANET_EVAL_RADIUS_LAMD = 0.5
 RING_WIDTH_LAMD = 4.0
 PHASE_CYCLES = 2.0
@@ -143,29 +145,27 @@ def _save_phase_mask_panels(sim_kwargs: dict, base_result: dict) -> None:
     for ax, phase in zip(axes.ravel(), REPRESENTATIVE_PHASES):
         sim.focal_local_phase_offset = float(phase)
         local_phase_map = sim._local_focal_phase_map()  # noqa: SLF001
-        panel = np.angle(base_result["mask"] * np.exp(-1j * local_phase_map))[sl, sl]
+        panel_phase = np.mod(np.angle(base_result["mask"] * np.exp(-1j * local_phase_map))[sl, sl], 2.0 * np.pi)
         im = ax.imshow(
-            panel,
+            panel_phase,
             origin="lower",
             cmap="twilight",
             extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD],
-            vmin=-np.pi,
-            vmax=np.pi,
-        )
-        ax.contour(
-            local_phase_map[sl, sl] > 0.0,
-            levels=[0.5],
-            colors=["white"],
-            linewidths=0.8,
-            origin="lower",
-            extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD],
+            vmin=0.0,
+            vmax=2.0 * np.pi,
+            interpolation="nearest",
         )
         ax.set_title(rf"$\phi = {phase / np.pi:.1f}\pi$", fontsize=12)
     fig.supxlabel(r"$x\;[\lambda/D]$", color=FG)
     fig.supylabel(r"$y\;[\lambda/D]$", color=FG)
     _style_transparent_figure(fig, axes)
-    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02)
-    _style_colorbar(cbar, label=r"Wrapped phase of vortex mask + modulation [rad]")
+    cbar = fig.colorbar(
+        ScalarMappable(norm=Normalize(vmin=0.0, vmax=2.0 * np.pi), cmap="twilight"),
+        ax=axes.ravel().tolist(),
+        fraction=0.025,
+        pad=0.02,
+    )
+    _style_colorbar(cbar, label=r"Phase of vortex mask + modulation [rad]")
     _save_figure_both(fig, OUTPUT_DIR / PHASE_MASK_NAME, dpi=DPI, transparent=True)
     plt.close(fig)
 
@@ -545,56 +545,53 @@ def _fit_panel(image: Image.Image, panel_width: int, panel_height: int, pad: int
     usable_h = max(1, panel_height - 2 * pad)
     resample = getattr(Image, "Resampling", Image).LANCZOS
     fitted = ImageOps.contain(image, (usable_w, usable_h), method=resample)
-    panel = Image.new("RGB", (panel_width, panel_height), bg)
+    panel = Image.new("RGBA", (panel_width, panel_height), bg)
     x0 = (panel_width - fitted.width) // 2
     y0 = (panel_height - fitted.height) // 2
-    panel.paste(fitted, (x0, y0))
+    panel.alpha_composite(fitted, (x0, y0))
     return panel
 
 
 def _save_workflow_strip() -> None:
-    bg = "#050B14"
-    accent = "#F39B5B"
-    text = "#FFF4E3"
-    mute = "#9FE7FF"
-    strip_w = 3600
-    strip_h = 980
-    margin_x = 60
-    panel_w = 760
-    panel_h = 760
-    top_y = 80
-    arrow_w = 120
-    pad = 20
-    titles = ["1. Phase Mask", "2. Coronagraphic PSF", "3. Time Series", "4. FFT in Time"]
+    bg = "#FFFFFF"
+    accent = "#000000"
+    strip_w = 2200
+    strip_h = 1560
+    margin_x = 70
+    margin_y = 50
+    gap_x = 70
+    gap_y = 40
+    panel_w = 980
+    panel_h = 640
+    label_h = 44
+    pad = 16
+    title_gap = 12
     filenames = [PHASE_MASK_NAME, FINAL_PSF_NAME, TIME_SERIES_NAME, FFT_NAME]
 
-    canvas = Image.new("RGB", (strip_w, strip_h), bg)
+    canvas = Image.new("RGBA", (strip_w, strip_h), bg)
     draw = ImageDraw.Draw(canvas)
     try:
         title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 42)
-        arrow_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 66)
-        footer_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 34)
     except Exception:
         title_font = ImageFont.load_default()
-        arrow_font = ImageFont.load_default()
-        footer_font = ImageFont.load_default()
 
-    x = margin_x
-    for idx, (title, filename) in enumerate(zip(titles, filenames)):
-        draw.text((x + 120, 18), title, fill=text, font=title_font)
-        panel = Image.open(OUTPUT_DIR / filename).convert("RGB")
+    positions = [
+        (margin_x, margin_y),
+        (margin_x + panel_w + gap_x, margin_y),
+        (margin_x, margin_y + label_h + panel_h + title_gap + gap_y),
+        (margin_x + panel_w + gap_x, margin_y + label_h + panel_h + title_gap + gap_y),
+    ]
+
+    for idx, (filename, (x, y)) in enumerate(zip(filenames, positions), start=1):
+        label = f"Step {idx}"
+        label_box = draw.textbbox((0, 0), label, font=title_font)
+        label_x = x + (panel_w - (label_box[2] - label_box[0])) // 2
+        draw.text((label_x, y), label, fill=accent, font=title_font)
+        panel = Image.open(OUTPUT_DIR / filename).convert("RGBA")
         panel = _fit_panel(panel, panel_w, panel_h, pad, bg)
-        canvas.paste(panel, (x, top_y))
-        if idx < len(titles) - 1:
-            arrow_x = x + panel_w + 18
-            draw.text((arrow_x, top_y + panel_h // 2 - 28), ">", fill=accent, font=arrow_font)
-            x += panel_w + arrow_w
+        canvas.alpha_composite(panel, (x, y + label_h + title_gap))
 
-    footer = "Phase modulation creates a temporal signal that separates incoherent planet light from coherent stellar speckles."
-    footer_box = draw.textbbox((0, 0), footer, font=footer_font)
-    footer_x = (strip_w - (footer_box[2] - footer_box[0])) // 2
-    draw.text((footer_x, 885), footer, fill=mute, font=footer_font)
-    canvas.save(OUTPUT_DIR / WORKFLOW_STRIP_NAME)
+    canvas.convert("RGB").save(OUTPUT_DIR / WORKFLOW_STRIP_NAME)
 
 
 def main() -> None:
@@ -619,12 +616,14 @@ def main() -> None:
     _save_time_series(phase_offsets=phase_offsets, aperture_traces=aperture_traces, labels=trace_labels)
     _save_fft(phase_offsets=phase_offsets, aperture_traces=aperture_traces, labels=trace_labels)
     _save_coherence_incoherence_maps(phase_offsets=phase_offsets, sim_kwargs=sim_kwargs)
+    _save_workflow_strip()
     print(f"Saved {PHASE_MASK_NAME}")
     print(f"Saved {FINAL_PSF_NAME}")
     print(f"Saved {TIME_SERIES_NAME}")
     print(f"Saved {FFT_NAME}")
     print(f"Saved {COHERENCE_MAP_NAME}")
     print(f"Saved {INCOHERENCE_MAP_NAME}")
+    print(f"Saved {WORKFLOW_STRIP_NAME}")
 
 
 if __name__ == "__main__":

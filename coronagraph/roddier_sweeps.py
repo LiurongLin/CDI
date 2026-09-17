@@ -121,8 +121,8 @@ def sweep_local_region_phase_peaks(
     if int(fov_count) < 1:
         raise ValueError("fov_count must be >= 1.")
     sweep_mode = str(phase_sweep_mode).strip().lower()
-    if sweep_mode not in {"regional", "global"}:
-        raise ValueError("phase_sweep_mode must be 'regional' or 'global'.")
+    if sweep_mode not in {"regional", "global", "focal_plane"}:
+        raise ValueError("phase_sweep_mode must be 'regional', 'global', or 'focal_plane'.")
 
     local_kwargs = dict(sim_kwargs)
     # Baseline run uses zero global phase offset; phase control is local only.
@@ -243,7 +243,7 @@ def sweep_local_region_phase_peaks(
 
     for i, phase in enumerate(phase_offsets):
         phase_kwargs = dict(local_kwargs)
-        if sweep_mode == "global":
+        if sweep_mode in {"global", "focal_plane"}:
             # Global phase injection using e_final_phase_offset.
             phase_kwargs["e_final_phase_offset"] = float(phase)
             phase_kwargs["focal_local_phase_offset"] = 0.0
