@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from . import cdi_feature as _impl
+from . import cdi_analysis as _impl
 
 globals().update({name: value for name, value in vars(_impl).items() if not name.startswith("__")})
-run_coc_planet_phase = _impl.run_cdi_planet_phase

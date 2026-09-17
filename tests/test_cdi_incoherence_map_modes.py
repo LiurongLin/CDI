@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from coronagraph.plotting import _coc_build_incoherence_maps
+from coronagraph.plotting import _cdi_build_incoherence_maps
 
 
 class CocIncoherenceMapModeTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class CocIncoherenceMapModeTests(unittest.TestCase):
         freq_bins = np.fft.fftfreq(n_phase, d=1.0)
         fft_cube = np.fft.fft(central_stack, axis=0)
 
-        info = _coc_build_incoherence_maps(
+        info = _cdi_build_incoherence_maps(
             freq_bins=freq_bins,
             fft_cube=fft_cube,
             central_stack_fft=central_stack,
@@ -39,7 +39,7 @@ class CocIncoherenceMapModeTests(unittest.TestCase):
         freq_bins = np.fft.fftfreq(n_phase, d=1.0)
         fft_cube = np.fft.fft(central_stack, axis=0)
 
-        info = _coc_build_incoherence_maps(
+        info = _cdi_build_incoherence_maps(
             freq_bins=freq_bins,
             fft_cube=fft_cube,
             central_stack_fft=central_stack,
@@ -59,7 +59,7 @@ class CocIncoherenceMapModeTests(unittest.TestCase):
         freq_bins = np.fft.fftfreq(n_phase, d=1.0)
         fft_cube = np.fft.fft(stack, axis=0)
 
-        info = _coc_build_incoherence_maps(
+        info = _cdi_build_incoherence_maps(
             freq_bins=freq_bins,
             fft_cube=fft_cube,
             central_stack_fft=stack,

@@ -1,0 +1,54 @@
+\documentclass[final]{article}
+\usepackage[paperwidth=44cm,paperheight=15.8cm,margin=0.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{adjustbox}
+\usepackage{tikz}
+\usepackage{varwidth}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+
+\definecolor{PosterBg}{HTML}{FFFFFF}
+\definecolor{PosterAccent}{HTML}{000000}
+\pagecolor{PosterBg}
+
+\newcommand{\RoundedGraphic}[2]{%
+  \begin{tikzpicture}
+    \node[inner sep=0pt, outer sep=0pt, rounded corners=10pt, clip] (img) {\adjustbox{#1}{#2}};
+  \end{tikzpicture}%
+}
+\newcommand{\StepImage}[1]{%
+  \begin{minipage}[t][9.9cm][t]{9.35cm}
+    \begin{center}
+      \RoundedGraphic{max width=8.9cm,max totalheight=8.8cm}{#1}
+    \end{center}
+  \end{minipage}%
+}
+\newcommand{\StepPanel}[2]{%
+  \begin{minipage}[t][6.8cm][t]{20.7cm}
+    \begin{center}
+      {\fontsize{28}{30}\selectfont\bfseries\color{PosterAccent}#1\par}
+      \vspace{0.25cm}
+      \RoundedGraphic{max width=19.6cm,max totalheight=5.9cm}{#2}
+    \end{center}
+  \end{minipage}%
+}
+
+\begin{document}
+\vspace*{0.10cm}
+\noindent
+\StepPanel{Step 1}{\includegraphics{coc_phase_mask_modulation_vortex_charge_2_ring_width_2p0_4phase_quadrature_square.png}}
+\hfill
+\StepPanel{Step 2}{\includegraphics{coc_final_psf_overlay_planet_circle_eval_radius_0p5_from_ring_width_2p0_with_companion_quadrature_square.png}}
+
+\vspace{0.35cm}
+
+\noindent
+\StepPanel{Step 3}{\includegraphics{coc_circle_intensity_sum_timeseries_vortex_charge_2_ring_width_2p0_eval_radius_0p5_cycles_2p0_with_companion_square.png}}
+\hfill
+\StepPanel{Step 4}{\includegraphics{coc_circle_intensity_sum_timeseries_fft_vortex_charge_2_ring_width_2p0_eval_radius_0p5_cycles_2p0_with_companion.png}}
+
+\end{document}

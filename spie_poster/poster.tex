@@ -1,0 +1,310 @@
+\documentclass[final]{article}
+
+\usepackage[paperwidth=84cm,paperheight=119cm,margin=0.9cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[scaled=0.95]{helvet}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{parskip}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{tikzpagenodes}
+\usepackage{hyperref}
+\usepackage{caption}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\columnsep}{0.7cm}
+\setlist[itemize]{leftmargin=0.82cm,itemsep=0.08cm,topsep=0.06cm,parsep=0.04cm,partopsep=0cm}
+\captionsetup{font={large},labelfont=bf,textfont={color=white}}
+\hypersetup{colorlinks=true,urlcolor=cyan}
+\definecolor{PosterBg}{HTML}{050B14}
+\definecolor{PosterBgMid}{HTML}{0B1626}
+\definecolor{PosterBg2}{HTML}{12263C}
+\definecolor{PosterPanel}{HTML}{112845}
+\definecolor{PosterPanelSoft}{HTML}{163456}
+\definecolor{PosterLine}{HTML}{35B7D6}
+\definecolor{PosterAccent}{HTML}{F39B5B}
+\definecolor{PosterAccentSoft}{HTML}{F6C38D}
+\definecolor{PosterIvory}{HTML}{FFF4E3}
+\definecolor{PosterText}{HTML}{FFF4CC}
+\definecolor{PosterMute}{HTML}{9FE7FF}
+\definecolor{PosterInk}{HTML}{08111F}
+\pagecolor{PosterBg}
+
+\newcommand{\PosterTitle}[1]{{\fontfamily{phv}\fontsize{62}{66}\selectfont\bfseries\color{PosterIvory} #1\par}}
+\newcommand{\PosterAuthors}[1]{{\fontfamily{phv}\fontsize{30}{33}\selectfont\bfseries\color{PosterMute} #1\par}}
+\newcommand{\PosterAffiliation}[1]{{\fontfamily{phv}\fontsize{16}{19}\selectfont\bfseries\color{PosterMute} #1\par}}
+\newcommand{\SectionTitle}[1]{{\fontfamily{phv}\fontsize{28}{31}\selectfont\bfseries\color{PosterIvory} #1\par}}
+\newcommand{\SectionTitleLarge}[1]{{\fontfamily{phv}\fontsize{31}{40}\selectfont\bfseries\color{PosterIvory} #1\par}}
+\newcommand{\BulletPanelCustomTitle}[2]{%
+  \noindent
+  \begin{minipage}[t]{0.95\linewidth}
+    \vspace{0.10cm}
+    #1
+    \vspace{0.10cm}
+    {\color{PosterLine}\rule{\linewidth}{2.5pt}}\par
+    \vspace{0.10cm}
+    {\BulletText #2\par}
+  \end{minipage}%
+}
+\newcommand{\BodyText}{\fontsize{25}{31}\selectfont\bfseries\color{PosterText}}
+\newcommand{\BulletText}{\fontsize{31}{50}\selectfont\bfseries\color{PosterText}}
+\newcommand{\BulletTextAccent}{\fontfamily{phv}\fontsize{31}{50}\selectfont\bfseries\color{PosterAccent}}
+\newcommand{\PanelGap}{\vspace{0.20cm}}
+\newcommand{\RoundedPosterGraphic}[2]{%
+  \begin{tikzpicture}
+    \node[inner sep=0pt, outer sep=0pt, rounded corners=16pt, clip] (img) {\includegraphics[#1]{#2}};
+    \draw[rounded corners=16pt, color=PosterBg, opacity=0.40, line width=40pt]
+      (img.south west) rectangle (img.north east);
+    \draw[rounded corners=16pt, color=PosterBg, opacity=0.28, line width=28pt]
+      (img.south west) rectangle (img.north east);
+    \draw[rounded corners=16pt, color=PosterBg, opacity=0.18, line width=16pt]
+      (img.south west) rectangle (img.north east);
+  \end{tikzpicture}%
+}
+
+\newcommand{\TextPanel}[2]{%
+  \noindent
+  \begin{minipage}[t]{0.95\linewidth}
+    \vspace{0.10cm}
+    \SectionTitle{#1}
+    \vspace{0.16cm}
+    {\color{PosterLine}\rule{\linewidth}{2.5pt}}\par
+    \vspace{0.16cm}
+    {\BodyText #2\par}
+  \end{minipage}%
+}
+
+\newcommand{\BulletPanel}[2]{%
+  \noindent
+  \begin{minipage}[t]{0.95\linewidth}
+    \vspace{0.10cm}
+    \SectionTitle{#1}
+    \vspace{0.16cm}
+    {\color{PosterLine}\rule{\linewidth}{2.5pt}}\par
+    \vspace{0.10cm}
+    {\BulletText #2\par}
+  \end{minipage}%
+}
+
+\newcommand{\FigurePanel}[3]{%
+  \noindent
+  \begin{tikzpicture}
+    \node[
+      inner sep=0pt,
+      outer sep=0pt,
+      rounded corners=14pt,
+      draw=PosterLine!28,
+      line width=1.0pt,
+      shade,
+      top color=PosterPanelSoft!72!black,
+      bottom color=PosterInk!98!black,
+      left color=PosterPanelSoft!88!PosterInk,
+      right color=PosterBg2!62!PosterInk
+    ] (panel) {%
+      \begin{minipage}[t]{0.985\linewidth}
+        \vspace{0.42cm}
+        \hspace{0.42cm}%
+        \begin{minipage}[t]{0.18\linewidth}
+          \vspace{0pt}
+          \SectionTitle{#1}
+          \vspace{0.2cm}
+          {\color{PosterAccent}\rule{\linewidth}{2.5pt}}\par
+        \end{minipage}\hfill
+        \begin{minipage}[t]{0.77\linewidth}
+          \vspace{0pt}
+          \centering
+          #3
+        \end{minipage}%
+        \hspace{0.42cm}
+        \vspace{0.38cm}
+      \end{minipage}%
+    };
+    \fill[PosterAccent,opacity=0.20,rounded corners=14pt]
+      ([xshift=0.18cm,yshift=-0.18cm]panel.north west) rectangle ([xshift=3.2cm,yshift=-0.48cm]panel.north west);
+    \draw[PosterLine!18,opacity=0.55,line width=0.8pt,rounded corners=14pt]
+      ([xshift=0.16cm,yshift=-0.16cm]panel.north west) rectangle ([xshift=-0.16cm,yshift=0.16cm]panel.south east);
+  \end{tikzpicture}%
+}
+
+\newcommand{\FigurePanelStacked}[3]{%
+  \noindent
+  \begin{tikzpicture}
+    \node[
+      inner sep=0pt,
+      outer sep=0pt,
+      rounded corners=14pt,
+      draw=PosterLine!28,
+      line width=1.0pt,
+      shade,
+      top color=PosterPanelSoft!72!black,
+      bottom color=PosterInk!98!black,
+      left color=PosterPanelSoft!88!PosterInk,
+      right color=PosterBg2!62!PosterInk
+    ] (panel) {%
+      \begin{minipage}[t]{0.985\linewidth}
+        \vspace{0.60cm}
+        \hspace{0.42cm}%
+        \begin{minipage}[t]{0.94\linewidth}
+          \vspace{0pt}
+          \SectionTitle{#1}
+          \vspace{0.20cm}
+          {\color{PosterAccent}\rule{\linewidth}{2.5pt}}\par
+          \vspace{0.20cm}
+          {\BodyText #2\par}
+          \vspace{0.28cm}
+          \centering
+          \begin{minipage}[t]{0.92\linewidth}
+            \centering
+            #3
+          \end{minipage}
+        \end{minipage}%
+        \hspace{0.42cm}
+        \vspace{0.58cm}
+      \end{minipage}%
+    };
+    \fill[PosterAccent,opacity=0.20,rounded corners=14pt]
+      ([xshift=0.18cm,yshift=-0.18cm]panel.north west) rectangle ([xshift=3.2cm,yshift=-0.48cm]panel.north west);
+    \draw[PosterLine!18,opacity=0.55,line width=0.8pt,rounded corners=14pt]
+      ([xshift=0.16cm,yshift=-0.16cm]panel.north west) rectangle ([xshift=-0.16cm,yshift=0.16cm]panel.south east);
+  \end{tikzpicture}%
+}
+
+\newcommand{\ImagePanel}[2]{%
+  \noindent
+  \begin{tikzpicture}
+    \node[
+      inner sep=0pt,
+      outer sep=0pt,
+      rounded corners=14pt,
+      draw=PosterLine!28,
+      line width=1.0pt,
+      shade,
+      top color=PosterPanelSoft!72!black,
+      bottom color=PosterInk!98!black,
+      left color=PosterPanelSoft!88!PosterInk,
+      right color=PosterBg2!62!PosterInk
+    ] (panel) {%
+      \begin{minipage}[t]{0.985\linewidth}
+        \vspace{0.36cm}
+        \hspace{0.36cm}%
+        \begin{minipage}[t]{0.94\linewidth}
+          \vspace{0pt}
+          \SectionTitle{#1}
+          \vspace{0.14cm}
+          {\color{PosterAccent}\rule{\linewidth}{2.3pt}}\par
+          \vspace{0.16cm}
+          \centering
+          \begin{minipage}[t]{0.96\linewidth}
+            \centering
+            #2
+          \end{minipage}
+        \end{minipage}%
+        \hspace{0.36cm}
+        \vspace{0.34cm}
+      \end{minipage}%
+    };
+    \fill[PosterAccent,opacity=0.20,rounded corners=14pt]
+      ([xshift=0.18cm,yshift=-0.18cm]panel.north west) rectangle ([xshift=3.2cm,yshift=-0.48cm]panel.north west);
+    \draw[PosterLine!18,opacity=0.55,line width=0.8pt,rounded corners=14pt]
+      ([xshift=0.16cm,yshift=-0.16cm]panel.north west) rectangle ([xshift=-0.16cm,yshift=0.16cm]panel.south east);
+  \end{tikzpicture}%
+}
+
+\begin{document}
+
+\begin{tikzpicture}[remember picture,overlay]
+  \fill[PosterBg] (current page.south west) rectangle (current page.north east);
+  \draw[PosterLine,opacity=0.20,line width=2pt] ([xshift=2cm,yshift=-2cm]current page.north west) -- ([xshift=28cm,yshift=-2cm]current page.north west);
+  \draw[PosterAccent,opacity=0.18,line width=2pt] ([xshift=-2cm,yshift=2.2cm]current page.south east) -- ([xshift=-26cm,yshift=2.2cm]current page.south east);
+\end{tikzpicture}
+
+% Header
+\noindent
+\colorbox{PosterBg}{%
+  \begin{minipage}[t][3.15cm][t]{\dimexpr\textwidth-2\fboxsep\relax}
+    \vspace{0.00cm}
+    \PosterTitle{Fast SLM-Driven CDI for Exoplanet High-Contrast Imaging}
+    \vspace{0.12cm}
+    \PosterAuthors{Liurong Lin$^{\ast,a}$, Lucas Marquis$^{a}$, Ruben Tandon$^{a}$, Jonas G. K\"uhn$^{a}$}
+    \vspace{0.02cm}
+    \PosterAffiliation{$^{a}$University of Bern, Physics Institute, Division of Space Research and Planetary Sciences, Sidlerstrasse 5, Bern, Switzerland}
+    \vspace{0.00cm}
+  \end{minipage}%
+}
+
+\vspace{0.06cm}
+
+% Top workflow
+\noindent
+\begin{center}
+% \begin{minipage}{0.96\textwidth}
+% {\fontfamily{phv}\fontsize{24}{28}\selectfont\bfseries\color{PosterMute}
+% Phase modulation creates a temporal signal that allows the planet's incoherent contribution to be separated from coherent stellar speckles.\par}
+% \end{minipage}
+\vspace{0.10cm}
+\RoundedPosterGraphic{width=0.985\linewidth,height=25.0cm,keepaspectratio}{workflow/workflow.png}
+\end{center}
+
+\vspace{0.18cm}
+
+% Middle row: ROI sweep only
+\noindent
+\begin{minipage}[t]{0.74\textwidth}
+\vspace{0pt}
+\begin{center}
+\RoundedPosterGraphic{width=0.985\linewidth,height=50cm,keepaspectratio}{roi_size_sweep_incoherence_maps_with_snr_vortex_charge_2_cycles_1p000_mode_regional_shape_ring_of_circle_rotfrac_0p000_rmin_0p500_rmax_3p000_rstep_0p500_ghost_on.pdf}
+\end{center}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.24\textwidth}
+\vspace{0pt}
+\BulletPanelCustomTitle{\SectionTitleLarge{ROI Sweep}}{
+{\BulletTextAccent
+\begin{itemize}
+\item Circle radius increases while orbit radius stays fixed.
+\item White circle marks the planet aperture; dashed annulus sets the local background.
+\item Best radius is the one that maximizes the SNR curve.
+\end{itemize}
+}}
+\vspace{22cm}
+
+\BulletPanelCustomTitle{\SectionTitleLarge{Rotation Sweep}}{
+{\BulletTextAccent
+\begin{itemize}
+\item Ring-of-circles pattern rotates at fixed orbital radius.
+\item Maps show how azimuthal placement changes the modulated planet signal.
+\item The SNR curve identifies the most effective rotation fraction.
+\end{itemize}
+}}
+\end{minipage}
+
+\vspace{0.18cm}
+
+% Bottom row: ring rotation
+\noindent
+\begin{center}
+\RoundedPosterGraphic{width=0.985\linewidth,height=25.5cm,keepaspectratio}{ring_rotation_sweep_incoherence_maps_vortex_charge_2_cycles_1p000_mode_regional_shape_ring_of_circle_rotfrac_0p000_rotmax_1p000_rotstep_0p200_ghost_on.pdf}
+\end{center}
+
+\vspace{0.35cm}
+
+% Bottom logo
+\noindent
+\begin{center}
+\begin{minipage}[c]{0.31\textwidth}
+  \centering
+  \includegraphics[height=2.9cm,keepaspectratio]{logos/Copy of Logo_Universität_Bern_Transparent_white.png}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.31\textwidth}
+  \centering
+  \includegraphics[height=2.9cm,keepaspectratio]{logos/LOGO-ERC_negatif.pdf}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.31\textwidth}
+  \centering
+  \includegraphics[height=2.9cm,keepaspectratio]{logos/WBF_SBFI_EU_Frameworkprogramme_E_RGB_neg_quer.pdf}
+\end{minipage}
+\end{center}
+
+\end{document}

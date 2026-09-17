@@ -15,7 +15,7 @@ from .plotting import (
     save_phase_mask_fits,
 )
 from .simulator import CoronagraphSimulator
-from .sweeps import sweep_roddier_phase_for_peak_match, sweep_roddier_radius_for_peak_match
+from .roddier_sweeps import sweep_roddier_phase_for_peak_match, sweep_roddier_radius_for_peak_match
 
 __all__ = [
     "CoronagraphSimulator",

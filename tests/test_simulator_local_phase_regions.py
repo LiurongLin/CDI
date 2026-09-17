@@ -6,7 +6,13 @@ import unittest
 import numpy as np
 from astropy.io import fits
 
+from coronagraph.masks import PhaseMask
 from coronagraph.simulator import CoronagraphSimulator
+
+
+class _LinearXPhaseMask(PhaseMask):
+    def transmission(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return np.exp(1j * x)
 
 
 class SimulatorLocalPhaseRegionTests(unittest.TestCase):
@@ -77,6 +83,265 @@ class SimulatorLocalPhaseRegionTests(unittest.TestCase):
             start = (phase_map.shape[0] - cube.shape[-1]) // 2
             stop = start + cube.shape[-1]
             np.testing.assert_allclose(phase_map[start:stop, start:stop], cube[0])
+
+    def test_coherent_ring_speckles_add_expected_offsets(self) -> None:
+        result = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            companion_flux_ratio=1e-3,
+            companion_offset_lamD=(4.0, 0.0),
+            coherent_ring_speckle_count=2,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+        ).run()
+
+        self.assertEqual(result["coherent_ring_speckle_count"], 2)
+        self.assertEqual(len(result["coherent_ring_speckle_offsets_lamD"]), 2)
+        expected = {
+            (-2.0, round(2.0 * np.sqrt(3.0), 6)),
+            (-2.0, round(-2.0 * np.sqrt(3.0), 6)),
+        }
+        actual = {
+            (round(float(x), 6), round(float(y), 6))
+            for x, y in result["coherent_ring_speckle_offsets_lamD"]
+        }
+        self.assertEqual(actual, expected)
+        self.assertGreater(np.max(result["coronagraphic_psf_star"]), 0.0)
+
+    def test_coherent_ring_speckles_match_planet_peak_in_final_science_psf(self) -> None:
+        common_kwargs = dict(
+            pupil_pixels=24,
+            focal_sampling=4.0,
+            companion_flux_ratio=5e-4,
+            companion_offset_lamD=(4.0, 0.0),
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            e_final_phase_offset=0.0,
+            focal_local_phase_offset=0.0,
+            focal_local_phase_centers_lamD=(),
+            focal_local_phase_radius_lamD=0.0,
+        )
+
+        star_only = CoronagraphSimulator(
+            **{**common_kwargs, "companion_flux_ratio": 0.0, "coherent_ring_speckle_count": 0}
+        ).run()
+        planet_only_sim = CoronagraphSimulator(
+            **{**common_kwargs, "coherent_ring_speckle_count": 0}
+        )
+        planet_only = planet_only_sim.run()
+        with_speckles_sim = CoronagraphSimulator(
+            **{**common_kwargs, "coherent_ring_speckle_count": 2}
+        )
+        with_speckles = with_speckles_sim.run()
+
+        planet_mask = planet_only_sim._lamD_aperture_mask(common_kwargs["companion_offset_lamD"])
+        planet_delta = (
+            np.asarray(planet_only["final_psf_with_ghost"], dtype=float)
+            - np.asarray(star_only["final_psf_with_ghost"], dtype=float)
+        )
+        planet_peak = float(np.max(planet_delta[planet_mask]))
+        self.assertGreater(planet_peak, 0.0)
+
+        speckle_delta = (
+            np.asarray(with_speckles["final_psf_with_ghost"], dtype=float)
+            - np.asarray(planet_only["final_psf_with_ghost"], dtype=float)
+        )
+        self.assertEqual(len(with_speckles["coherent_ring_speckle_source_amplitudes"]), 2)
+        for offset in with_speckles["coherent_ring_speckle_offsets_lamD"]:
+            speckle_mask = with_speckles_sim._lamD_aperture_mask(offset)
+            speckle_peak = float(np.max(speckle_delta[speckle_mask]))
+            self.assertGreater(speckle_peak, 0.0)
+            self.assertAlmostEqual(speckle_peak / planet_peak, 1.0, delta=0.05)
+
+    def test_phase_mask_rotation_rotates_mask_coordinates(self) -> None:
+        base = CoronagraphSimulator(
+            pupil_pixels=8,
+            focal_sampling=2.0,
+            phase_mask=_LinearXPhaseMask(),
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+        )
+        rotated = CoronagraphSimulator(
+            pupil_pixels=8,
+            focal_sampling=2.0,
+            phase_mask=_LinearXPhaseMask(),
+            phase_mask_rotation_rad=np.pi / 2.0,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+        )
+
+        base_mask = base._sampled_phase_mask()
+        rotated_mask = rotated._sampled_phase_mask()
+        expected = np.exp(1j * (base._y / base.focal_sampling))
+
+        self.assertFalse(np.allclose(base_mask, rotated_mask))
+        np.testing.assert_allclose(rotated_mask, expected)
+
+    def test_perfect_coronagraph_cancels_unaberrated_star_at_lyot_plane(self) -> None:
+        result = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+        ).run()
+
+        self.assertTrue(result["perfect_coronagraph"])
+        self.assertGreater(np.max(np.abs(result["lyot_reference_field"])), 0.0)
+        self.assertLess(np.max(np.abs(result["lyot_field"])), 1e-10)
+        self.assertLess(np.max(result["coronagraphic_psf_star"]), 1e-12)
+
+    def test_perfect_coronagraph_preserves_companion_branch(self) -> None:
+        result = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            companion_flux_ratio=1e-3,
+            companion_offset_lamD=(3.0, 0.0),
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+        ).run()
+
+        self.assertLess(np.max(result["coronagraphic_psf_star"]), 1e-12)
+        self.assertGreater(np.max(result["coronagraphic_psf_companion"]), 0.0)
+        self.assertGreater(np.max(result["coronagraphic_psf"]), 0.0)
+
+    def test_perfect_coronagraph_reference_branch_skips_focal_plane_modulation(self) -> None:
+        baseline = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+        ).run()
+        modulated = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+            e_final_phase_offset=np.pi / 2.0,
+            focal_local_phase_offset=np.pi / 3.0,
+            focal_local_phase_centers_lamD=((1.5, 0.0),),
+            focal_local_phase_radius_lamD=0.5,
+        ).run()
+
+        np.testing.assert_allclose(
+            modulated["lyot_reference_field"],
+            baseline["lyot_field_before_reference_subtraction"],
+        )
+        self.assertGreater(np.max(np.abs(modulated["lyot_field"])), 0.0)
+
+    def test_perfect_coronagraph_partial_reference_subtraction_scales_lyot_reference(self) -> None:
+        baseline = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+        ).run()
+        partial = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+            lyot_reference_scale=0.5,
+        ).run()
+
+        self.assertAlmostEqual(partial["lyot_reference_scale"], 0.5)
+        np.testing.assert_allclose(
+            partial["lyot_reference_field"],
+            0.5 * baseline["lyot_field_before_reference_subtraction"],
+        )
+        self.assertGreater(np.max(np.abs(partial["lyot_field"])), 0.0)
+        self.assertGreater(np.max(partial["coronagraphic_psf_star"]), 0.0)
+
+    def test_perfect_coronagraph_keeps_speckles_in_full_output_but_not_reference_branch(self) -> None:
+        baseline = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            companion_flux_ratio=1e-3,
+            companion_offset_lamD=(4.0, 0.0),
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+            coherent_ring_speckle_count=0,
+        ).run()
+        with_speckles = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            companion_flux_ratio=1e-3,
+            companion_offset_lamD=(4.0, 0.0),
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+            coherent_ring_speckle_count=3,
+        ).run()
+
+        self.assertEqual(len(with_speckles["coherent_ring_speckle_offsets_lamD"]), 3)
+        np.testing.assert_allclose(
+            with_speckles["lyot_reference_field"],
+            baseline["lyot_reference_field"],
+        )
+        self.assertFalse(
+            np.allclose(
+                with_speckles["coronagraphic_psf_star"],
+                baseline["coronagraphic_psf_star"],
+            )
+        )
+        self.assertFalse(
+            np.allclose(
+                with_speckles["final_psf_with_ghost"],
+                baseline["final_psf_with_ghost"],
+            )
+        )
+
+    def test_perfect_coronagraph_reference_branch_is_star_only(self) -> None:
+        baseline = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+        ).run()
+        with_companion_and_speckles = CoronagraphSimulator(
+            pupil_pixels=16,
+            focal_sampling=2.0,
+            secondary_diameter_ratio=0.25,
+            companion_flux_ratio=1e-3,
+            companion_offset_lamD=(4.0, 0.0),
+            coherent_ring_speckle_count=3,
+            ghost_fraction=0.0,
+            include_ghost=False,
+            include_interference=False,
+            perfect_coronagraph=True,
+        ).run()
+
+        np.testing.assert_allclose(
+            with_companion_and_speckles["lyot_reference_field"],
+            baseline["lyot_reference_field"],
+        )
 
 
 if __name__ == "__main__":
