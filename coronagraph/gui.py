@@ -26,7 +26,7 @@ Mask and Sampling
 - Incoherence Map Mode: choose the simulation-side FFT-band map or the lab-style inverse FFT-ratio map.
 
 Local/ROI Controls
-- Sweep Mode: regional or global.
+- Sweep Mode: regional, global, focal_plane, or mask_rotation.
 - Local Region Radius: circular ROI radius (lambda/D), or annulus width for `ring`.
 - Region Shape: `circle`, `ring`, or `ring_of_circle`.
 - Ring Rotation Fraction: for `ring_of_circle`, `0` keeps a circle centered on the planet and `1` shifts to the edge-cut position.
@@ -35,9 +35,10 @@ Local/ROI Controls
 - Single Ring Radius: optional orbit/expansion radius.
 
 Phase Controls
-- Phase Step: number of phase steps for each ROI.
+- Phase Step: number of phase steps for each ROI, or rotation steps over one full turn in `mask_rotation`.
 - Phase Cycles / FOV: number of phase cycles allocated to each sequential FOV-center group.
 - Planet Flux Ratio.
+- Coherent Ring Speckles: number of extra star-coherent speckles added on the same ring as the planet.
 - Planet Position Radius / Theta.
 - Secondary Ratio (Local).
 
@@ -59,6 +60,7 @@ Optics/Pupil
 Flags
 - Disable Ghost.
 - Disable Interference.
+- Disable Companion.
 - Disable Companion Ghost.
 - Build Map per FOV.
 """
@@ -453,7 +455,7 @@ HTML = """<!doctype html>
   <div class="topbar">
     <div>
       <h2>CDI Explorer</h2>
-      <p class="subtitle">Mode: <code>coc-planet-phase</code></p>
+      <p class="subtitle">Mode: <code>cdi-planet-phase</code></p>
     </div>
     <div class="theme-select-wrap">
       <label for="theme_preset">Theme</label>
@@ -467,7 +469,7 @@ HTML = """<!doctype html>
   <div class="section-card">
   <h3 class="section-title">Simulation Parameters</h3>
   <div class="grid">
-    <div class="field"><label>Phase Mask</label><select id="phase_mask_type"><option>roddier</option><option>vortex</option></select></div>
+    <div class="field"><label>Phase Mask</label><select id="phase_mask_type"><option>roddier</option><option>vortex</option><option>perfect_corongraph</option></select></div>
     <div class="field"><label id="label_roddier_mask_radius">Roddier Radius <span class="unit">λ/D</span></label><input id="roddier_mask_radius" value="0.53" /></div>
     <div class="field"><label id="label_roddier_mask_phase">Roddier Phase <span class="unit">rad</span></label><input id="roddier_mask_phase" value="3.1415926535" /></div>
     <div class="field"><label id="label_vortex_charge">Vortex Charge</label><input id="vortex_charge" value="2" /></div>
@@ -477,7 +479,7 @@ HTML = """<!doctype html>
     <div class="field"><label>Pupil SS <span class="tip" title="Entrance pupil supersampling factor per axis">?</span></label><input id="pupil_ss" value="8" /></div>
     <div class="field"><label>Phase Screen Jitter <span class="unit">% λ/D</span></label><select id="phase_screen_jitter"><option value="none">none</option><option value="0">0</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></div>
     <div class="field"><label>Incoherence Map Mode</label><select id="incoherence_map_mode"><option value="fft_band">fft_band</option><option value="lab_fft_ratio">lab_fft_ratio</option></select></div>
-    <div class="field"><label>Sweep Mode</label><select id="phase_sweep_mode"><option>regional</option><option>global</option></select></div>
+    <div class="field"><label>Sweep Mode</label><select id="phase_sweep_mode"><option>regional</option><option>global</option><option>focal_plane</option><option>mask_rotation</option></select></div>
     <div class="field"><label>Local Region Radius <span class="unit">λ/D</span></label><input id="local_region_radius" value="2.0" /></div>
     <div class="field"><label>Region Shape</label><select id="region_shape"><option>circle</option><option>ring</option><option>ring_of_circle</option></select></div>
     <div class="field" id="field_fov_count"><label>FOV Count <span class="tip" title="How many FOVs are phase-shifted simultaneously">?</span></label><input id="fov_count" value="1" /></div>
@@ -488,6 +490,10 @@ HTML = """<!doctype html>
     <div class="field"><label>Planet Theta <span class="unit">deg</span><span class="tip" title="0° is +X, 90° is +Y">?</span></label><input id="planet_offset_theta_deg_local" value="0.0" /></div>
     <div class="field"><label>Secondary Ratio (Local)</label><input id="secondary_ratio_local" value="0.25" /></div>
     <div class="field"><label>Planet Flux Ratio</label><input id="planet_flux_ratio_local" value="0.01" /></div>
+    <div class="field"><label>Enable Coherent Ring Speckles</label><select id="coherent_ring_speckles_enabled"><option value="off" selected>off</option><option value="on">on</option></select></div>
+    <div class="field"><label>Coherent Ring Speckles</label><input id="coherent_ring_speckle_count" value="0" /></div>
+    <div class="field"><label>Speckle Intensity <span class="tip" title="Input intensity per coherent speckle relative to the star source; 1 means one star intensity.">?</span></label><input id="coherent_ring_speckle_intensity" value="1.0" /></div>
+    <div class="field"><label>Lyot Reference Subtraction <span class="unit">%</span></label><input id="lyot_reference_percent" value="100" /></div>
   </div>
   </div>
 
@@ -520,6 +526,26 @@ HTML = """<!doctype html>
   </fieldset>
 
   <fieldset>
+    <legend>Planet Location Sweep</legend>
+    <div class="roi-sweep-wrap">
+      <div class="roi-sweep-toggle-row">
+        <div class="left">Enable Location Sweep</div>
+        <label class="toggle-inline" id="label_planet_position_map_sweep"><input type="checkbox" id="planet_position_map_sweep" /> On</label>
+      </div>
+      <div id="planet_position_map_sweep_fields" class="roi-sweep-fields">
+        <div class="grid">
+          <div class="field"><label>Planet Radius Min <span class="unit">λ/D</span></label><input id="planet_position_radius_min_map" value="0.5" /></div>
+          <div class="field"><label>Planet Radius Max <span class="unit">λ/D</span></label><input id="planet_position_radius_max_map" value="4.0" /></div>
+          <div class="field"><label>Planet Radius Step <span class="unit">λ/D</span></label><input id="planet_position_radius_step_map" value="0.5" /></div>
+          <div class="field"><label>Planet Theta Min <span class="unit">deg</span></label><input id="planet_position_theta_min_deg_map" value="-180.0" /></div>
+          <div class="field"><label>Planet Theta Max <span class="unit">deg</span></label><input id="planet_position_theta_max_deg_map" value="180.0" /></div>
+          <div class="field"><label>Planet Theta Step <span class="unit">deg</span></label><input id="planet_position_theta_step_deg_map" value="15.0" /></div>
+        </div>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
     <legend>Planet Location + ROI Size Sweep</legend>
     <div class="roi-sweep-wrap">
       <div class="roi-sweep-toggle-row">
@@ -533,12 +559,76 @@ HTML = """<!doctype html>
           <div class="field"><label>ROI Size Step <span class="unit">λ/D</span></label><input id="roi_size_step" value="0.25" /></div>
         </div>
         <div class="grid">
-          <div class="field"><label>Planet Radius Min <span class="unit">λ/D</span></label><input id="planet_position_radius_min" value="0.5" /></div>
-          <div class="field"><label>Planet Radius Max <span class="unit">λ/D</span></label><input id="planet_position_radius_max" value="4.0" /></div>
-          <div class="field"><label>Planet Radius Step <span class="unit">λ/D</span></label><input id="planet_position_radius_step" value="0.5" /></div>
-          <div class="field"><label>Planet Theta Min <span class="unit">deg</span></label><input id="planet_position_theta_min_deg" value="-180.0" /></div>
-          <div class="field"><label>Planet Theta Max <span class="unit">deg</span></label><input id="planet_position_theta_max_deg" value="180.0" /></div>
-          <div class="field"><label>Planet Theta Step <span class="unit">deg</span></label><input id="planet_position_theta_step_deg" value="15.0" /></div>
+          <div class="field"><label>Planet Radius Min <span class="unit">λ/D</span></label><input id="planet_position_radius_min_roi" value="0.5" /></div>
+          <div class="field"><label>Planet Radius Max <span class="unit">λ/D</span></label><input id="planet_position_radius_max_roi" value="4.0" /></div>
+          <div class="field"><label>Planet Radius Step <span class="unit">λ/D</span></label><input id="planet_position_radius_step_roi" value="0.5" /></div>
+          <div class="field"><label>Planet Theta Min <span class="unit">deg</span></label><input id="planet_position_theta_min_deg_roi" value="-180.0" /></div>
+          <div class="field"><label>Planet Theta Max <span class="unit">deg</span></label><input id="planet_position_theta_max_deg_roi" value="180.0" /></div>
+          <div class="field"><label>Planet Theta Step <span class="unit">deg</span></label><input id="planet_position_theta_step_deg_roi" value="15.0" /></div>
+        </div>
+        <div class="grid">
+          <div class="field"><label>Lyot Ref Min <span class="unit">%</span></label><input id="lyot_reference_percent_min_roi" value="100" /></div>
+          <div class="field"><label>Lyot Ref Max <span class="unit">%</span></label><input id="lyot_reference_percent_max_roi" value="100" /></div>
+          <div class="field"><label>Lyot Ref Step <span class="unit">%</span></label><input id="lyot_reference_percent_step_roi" value="0" /></div>
+        </div>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Planet Brightness Sweep</legend>
+    <div class="roi-sweep-wrap">
+      <div class="roi-sweep-toggle-row">
+        <div class="left">Enable Brightness Sweep</div>
+        <label class="toggle-inline" id="label_planet_flux_ratio_map_sweep"><input type="checkbox" id="planet_flux_ratio_map_sweep" /> On</label>
+      </div>
+      <div id="planet_flux_ratio_map_sweep_fields" class="roi-sweep-fields">
+        <div class="grid">
+          <div class="field"><label>Flux Ratio Min</label><input id="planet_flux_ratio_sweep_min" value="0.001" /></div>
+          <div class="field"><label>Flux Ratio Max</label><input id="planet_flux_ratio_sweep_max" value="0.010" /></div>
+          <div class="field"><label>Flux Ratio Step</label><input id="planet_flux_ratio_sweep_step" value="0.001" /></div>
+        </div>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Mask Rotation Step Sweep</legend>
+    <div class="roi-sweep-wrap">
+      <div class="roi-sweep-toggle-row">
+        <div class="left">Enable Step Sweep</div>
+        <label class="toggle-inline" id="label_mask_rotation_phase_step_sweep"><input type="checkbox" id="mask_rotation_phase_step_sweep" /> On</label>
+      </div>
+      <div id="mask_rotation_phase_step_sweep_fields" class="roi-sweep-fields">
+        <div class="grid">
+          <div class="field"><label>Step Count Min</label><input id="phase_step_sweep_min" value="4" /></div>
+          <div class="field"><label>Step Count Max</label><input id="phase_step_sweep_max" value="24" /></div>
+          <div class="field"><label>Step Count Step</label><input id="phase_step_sweep_step" value="4" /></div>
+        </div>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Planet Location + Brightness Sweep</legend>
+    <div class="roi-sweep-wrap">
+      <div class="roi-sweep-toggle-row">
+        <div class="left">Enable Position + Brightness Sweep</div>
+        <label class="toggle-inline" id="label_planet_position_brightness_sweep"><input type="checkbox" id="planet_position_brightness_sweep" /> On</label>
+      </div>
+      <div id="planet_position_brightness_sweep_fields" class="roi-sweep-fields">
+        <div class="grid">
+          <div class="field"><label>Planet Radius Min <span class="unit">λ/D</span></label><input id="planet_position_radius_min_brightness" value="0.5" /></div>
+          <div class="field"><label>Planet Radius Max <span class="unit">λ/D</span></label><input id="planet_position_radius_max_brightness" value="4.0" /></div>
+          <div class="field"><label>Planet Radius Step <span class="unit">λ/D</span></label><input id="planet_position_radius_step_brightness" value="0.5" /></div>
+          <div class="field"><label>Planet Theta Min <span class="unit">deg</span></label><input id="planet_position_theta_min_deg_brightness" value="-180.0" /></div>
+          <div class="field"><label>Planet Theta Max <span class="unit">deg</span></label><input id="planet_position_theta_max_deg_brightness" value="180.0" /></div>
+          <div class="field"><label>Planet Theta Step <span class="unit">deg</span></label><input id="planet_position_theta_step_deg_brightness" value="15.0" /></div>
+        </div>
+        <div class="grid">
+          <div class="field"><label>Flux Ratio Min</label><input id="planet_flux_ratio_sweep_min" value="0.001" /></div>
+          <div class="field"><label>Flux Ratio Max</label><input id="planet_flux_ratio_sweep_max" value="0.010" /></div>
+          <div class="field"><label>Flux Ratio Step</label><input id="planet_flux_ratio_sweep_step" value="0.001" /></div>
         </div>
       </div>
     </div>
@@ -549,6 +639,8 @@ HTML = """<!doctype html>
   <div class="checks">
     <label><input type="checkbox" id="disable_ghost" /> Disable Ghost</label>
     <label><input type="checkbox" id="disable_interference" /> Disable Interference</label>
+    <label><input type="checkbox" id="disable_star" /> Disable Star</label>
+    <label><input type="checkbox" id="disable_companion" /> Disable Companion</label>
     <label><input type="checkbox" id="disable_companion_ghost" /> Disable Companion Ghost</label>
     <label><input type="checkbox" id="build_map_per_fov" /> Build Map per FOV</label>
     <label><input type="checkbox" id="plot_poster_figure" /> Plot Poster Figure</label>
@@ -576,18 +668,28 @@ const fields = [
   "spider_angles","pupil_ss","phase_screen_jitter","incoherence_map_mode","phase_sweep_mode","local_region_radius","region_shape","fov_count","fov_centers_count",
   "single_region_ring_radius","enable_ring_of_circle_sweep","enable_ring_rotation_sweep",
   "ring_rotation_fraction","ring_rotation_sweep_max","ring_rotation_sweep_step","phase_step",
-  "phase_cycles","planet_offset_radius_local","planet_offset_theta_deg_local","secondary_ratio_local",
-  "planet_flux_ratio_local","roi_size_sweep","roi_size_min","roi_size_max","roi_size_step",
-  "planet_position_roi_size_sweep","planet_position_radius_min","planet_position_radius_max","planet_position_radius_step",
-  "planet_position_theta_min_deg","planet_position_theta_max_deg","planet_position_theta_step_deg",
+  "phase_cycles","planet_offset_radius_local","planet_offset_theta_deg_local","secondary_ratio_local","lyot_reference_percent","coherent_ring_speckles_enabled",
+  "planet_flux_ratio_local","coherent_ring_speckle_count","coherent_ring_speckle_intensity","roi_size_sweep","roi_size_min","roi_size_max","roi_size_step",
+  "planet_position_map_sweep",
+  "planet_position_radius_min_map","planet_position_radius_max_map","planet_position_radius_step_map",
+  "planet_position_theta_min_deg_map","planet_position_theta_max_deg_map","planet_position_theta_step_deg_map",
+  "planet_position_roi_size_sweep","lyot_reference_percent_min_roi","lyot_reference_percent_max_roi","lyot_reference_percent_step_roi",
+  "planet_position_radius_min_roi","planet_position_radius_max_roi","planet_position_radius_step_roi",
+  "planet_position_theta_min_deg_roi","planet_position_theta_max_deg_roi","planet_position_theta_step_deg_roi",
+  "planet_flux_ratio_map_sweep",
+  "mask_rotation_phase_step_sweep","phase_step_sweep_min","phase_step_sweep_max","phase_step_sweep_step",
+  "planet_position_brightness_sweep","planet_position_radius_min_brightness","planet_position_radius_max_brightness","planet_position_radius_step_brightness",
+  "planet_position_theta_min_deg_brightness","planet_position_theta_max_deg_brightness","planet_position_theta_step_deg_brightness",
+  "planet_flux_ratio_sweep_min","planet_flux_ratio_sweep_max","planet_flux_ratio_sweep_step",
   "disable_ghost","disable_interference",
-  "disable_companion_ghost","build_map_per_fov","plot_poster_figure"
+  "disable_star","disable_companion","disable_companion_ghost","build_map_per_fov","plot_poster_figure"
 ];
 
 function collect() {
   const d = {};
   for (const k of fields) {
     const el = document.getElementById(k);
+    if (!el) continue;
     d[k] = (el.type === "checkbox") ? el.checked : el.value;
   }
   return d;
@@ -606,11 +708,13 @@ function showToast(msg, kind="ok") {
 }
 
 function setMaskVisibility() {
-  const isRoddier = document.getElementById("phase_mask_type").value === "roddier";
+  const maskType = document.getElementById("phase_mask_type").value;
+  const isRoddier = maskType === "roddier";
+  const isVortex = maskType === "vortex";
   const roddierIds = ["label_roddier_mask_radius", "roddier_mask_radius", "label_roddier_mask_phase", "roddier_mask_phase"];
   const vortexIds = ["label_vortex_charge", "vortex_charge"];
   for (const id of roddierIds) document.getElementById(id).style.display = isRoddier ? "" : "none";
-  for (const id of vortexIds) document.getElementById(id).style.display = isRoddier ? "none" : "";
+  for (const id of vortexIds) document.getElementById(id).style.display = isVortex ? "" : "none";
 }
 
 function setSpiderVisibility() {
@@ -625,6 +729,40 @@ function setSpiderVisibility() {
     !spidersEnabled,
     spidersEnabled ? "" : "Ignored when spiders are off.",
   );
+}
+
+function setCoherentRingSpeckleVisibility() {
+  const enabled = document.getElementById("coherent_ring_speckles_enabled").value === "on";
+  setFieldDisabled(
+    "coherent_ring_speckle_count",
+    !enabled,
+    enabled ? "" : "Ignored when coherent ring speckles are off.",
+  );
+  setFieldDisabled(
+    "coherent_ring_speckle_intensity",
+    !enabled,
+    enabled ? "" : "Ignored when coherent ring speckles are off.",
+  );
+}
+
+function setLyotReferenceVisibility() {
+  const maskType = document.getElementById("phase_mask_type").value;
+  const perfectCoronagraph = maskType === "perfect_corongraph" || maskType === "perfect_coronagraph";
+  const posRoiSweepEnabled = document.getElementById("planet_position_roi_size_sweep").checked;
+  setFieldDisabled(
+    "lyot_reference_percent",
+    !perfectCoronagraph,
+    perfectCoronagraph ? "" : "Used only for the perfect coronagraph.",
+  );
+  for (const id of ["lyot_reference_percent_min_roi", "lyot_reference_percent_max_roi", "lyot_reference_percent_step_roi"]) {
+    setFieldDisabled(
+      id,
+      !perfectCoronagraph || !posRoiSweepEnabled,
+      !perfectCoronagraph
+        ? "Used only for the perfect coronagraph."
+        : (!posRoiSweepEnabled ? "Used only for the planet location + ROI size sweep." : ""),
+    );
+  }
 }
 
 function updateChoiceButtons() {
@@ -646,6 +784,30 @@ function updateChoiceButtons() {
   if (posLab && posCb) {
     if (posCb.checked) posLab.classList.add("is-on");
     else posLab.classList.remove("is-on");
+  }
+  const posMapLab = document.getElementById("label_planet_position_map_sweep");
+  const posMapCb = document.getElementById("planet_position_map_sweep");
+  if (posMapLab && posMapCb) {
+    if (posMapCb.checked) posMapLab.classList.add("is-on");
+    else posMapLab.classList.remove("is-on");
+  }
+  const fluxMapLab = document.getElementById("label_planet_flux_ratio_map_sweep");
+  const fluxMapCb = document.getElementById("planet_flux_ratio_map_sweep");
+  if (fluxMapLab && fluxMapCb) {
+    if (fluxMapCb.checked) fluxMapLab.classList.add("is-on");
+    else fluxMapLab.classList.remove("is-on");
+  }
+  const stepSweepLab = document.getElementById("label_mask_rotation_phase_step_sweep");
+  const stepSweepCb = document.getElementById("mask_rotation_phase_step_sweep");
+  if (stepSweepLab && stepSweepCb) {
+    if (stepSweepCb.checked) stepSweepLab.classList.add("is-on");
+    else stepSweepLab.classList.remove("is-on");
+  }
+  const brightLab = document.getElementById("label_planet_position_brightness_sweep");
+  const brightCb = document.getElementById("planet_position_brightness_sweep");
+  if (brightLab && brightCb) {
+    if (brightCb.checked) brightLab.classList.add("is-on");
+    else brightLab.classList.remove("is-on");
   }
   const ringLab = document.getElementById("label_ring_of_circle_sweep");
   const ringCb = document.getElementById("enable_ring_of_circle_sweep");
@@ -732,6 +894,30 @@ function restoreUiState() {
       if (Number.isFinite(xStep)) state.planet_position_radius_step = String(Math.abs(xStep));
       if (Number.isFinite(yStep)) state.planet_position_theta_step_deg = String(Math.abs(yStep));
     }
+    for (const [legacyKey, mapKey] of [
+      ["planet_position_radius_min", "planet_position_radius_min_map"],
+      ["planet_position_radius_max", "planet_position_radius_max_map"],
+      ["planet_position_radius_step", "planet_position_radius_step_map"],
+      ["planet_position_theta_min_deg", "planet_position_theta_min_deg_map"],
+      ["planet_position_theta_max_deg", "planet_position_theta_max_deg_map"],
+      ["planet_position_theta_step_deg", "planet_position_theta_step_deg_map"],
+    ]) {
+      if (!(mapKey in state) && (legacyKey in state)) {
+        state[mapKey] = state[legacyKey];
+      }
+    }
+    for (const [legacyKey, roiKey] of [
+      ["planet_position_radius_min", "planet_position_radius_min_roi"],
+      ["planet_position_radius_max", "planet_position_radius_max_roi"],
+      ["planet_position_radius_step", "planet_position_radius_step_roi"],
+      ["planet_position_theta_min_deg", "planet_position_theta_min_deg_roi"],
+      ["planet_position_theta_max_deg", "planet_position_theta_max_deg_roi"],
+      ["planet_position_theta_step_deg", "planet_position_theta_step_deg_roi"],
+    ]) {
+      if (!(roiKey in state) && (legacyKey in state)) {
+        state[roiKey] = state[legacyKey];
+      }
+    }
     for (const k of fields) {
       if (!(k in state)) continue;
       const el = document.getElementById(k);
@@ -753,7 +939,11 @@ function setFieldDisabled(id, disabled, title="") {
 function makeSweepModesExclusive(changedId) {
   const sweepIds = [
     "roi_size_sweep",
+    "planet_position_map_sweep",
     "planet_position_roi_size_sweep",
+    "planet_flux_ratio_map_sweep",
+    "mask_rotation_phase_step_sweep",
+    "planet_position_brightness_sweep",
   ];
   const changed = document.getElementById(changedId);
   if (!changed || !changed.checked) return;
@@ -783,8 +973,16 @@ async function tick() {
   }
 
   const roiSweepEnabled = document.getElementById("roi_size_sweep").checked;
+  const posMapSweepEnabled = document.getElementById("planet_position_map_sweep").checked;
   const posRoiSweepEnabled = document.getElementById("planet_position_roi_size_sweep").checked;
+  const fluxMapSweepEnabled = document.getElementById("planet_flux_ratio_map_sweep").checked;
+  const stepSweepEnabled = document.getElementById("mask_rotation_phase_step_sweep").checked;
+  const posBrightnessSweepEnabled = document.getElementById("planet_position_brightness_sweep").checked;
+  const sweepMode = document.getElementById("phase_sweep_mode").value;
   const regionShape = document.getElementById("region_shape").value;
+  const isMaskRotation = sweepMode === "mask_rotation";
+  const isWholeFocalPlane = sweepMode === "global" || sweepMode === "focal_plane";
+  const roiSizeIgnored = isMaskRotation || (posRoiSweepEnabled && isWholeFocalPlane);
   const isRing = regionShape === "ring";
   const isRingOfCircle = regionShape === "ring_of_circle";
   const ringSweepEnabled = document.getElementById("enable_ring_of_circle_sweep").checked;
@@ -794,57 +992,105 @@ async function tick() {
   const fovCountField = document.getElementById("field_fov_count");
   const fovCentersField = document.getElementById("field_fov_centers_count");
   if (ringSection) {
-    ringSection.style.display = isRingOfCircle ? "" : "none";
+    ringSection.style.display = (isRingOfCircle && !isMaskRotation) ? "" : "none";
   }
   if (fovCountField) {
-    fovCountField.style.display = isRing ? "none" : "";
+    fovCountField.style.display = (isRing || isMaskRotation) ? "none" : "";
   }
   if (fovCentersField) {
-    fovCentersField.style.display = isRing ? "none" : "";
+    fovCentersField.style.display = (isRing || isMaskRotation) ? "none" : "";
   }
-  document.getElementById("local_region_radius").disabled = roiSweepEnabled || posRoiSweepEnabled;
+  setFieldDisabled(
+    "local_region_radius",
+    roiSweepEnabled || posMapSweepEnabled || posRoiSweepEnabled || fluxMapSweepEnabled || stepSweepEnabled || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode modulates the phase mask directly." : "",
+  );
+  setFieldDisabled(
+    "region_shape",
+    isMaskRotation,
+    isMaskRotation ? "Mask rotation mode does not use local modulation regions." : "",
+  );
   setFieldDisabled(
     "fov_count",
-    isRingOfCircle,
-    isRingOfCircle ? "Auto-derived for ring_of_circle." : "",
+    isRingOfCircle || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode does not use local FOV grouping." : (isRingOfCircle ? "Auto-derived for ring_of_circle." : ""),
   );
   setFieldDisabled(
     "fov_centers_count",
-    isRingOfCircle,
-    isRingOfCircle ? "Auto-derived for ring_of_circle." : "",
+    isRingOfCircle || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode does not use local FOV grouping." : (isRingOfCircle ? "Auto-derived for ring_of_circle." : ""),
   );
   setFieldDisabled(
     "single_region_ring_radius",
-    isRingOfCircle,
-    isRingOfCircle ? "Not used for ring_of_circle in the CoC planet run." : "",
+    isRingOfCircle || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode does not use local modulation regions." : (isRingOfCircle ? "Not used for ring_of_circle in the CDI planet run." : ""),
   );
   setFieldDisabled(
     "ring_rotation_fraction",
-    !isRingOfCircle || !singleRotationEnabled,
-    !isRingOfCircle ? "Used only for ring_of_circle." : (!singleRotationEnabled ? "Enable Single Rotation Offset to use this." : ""),
+    !isRingOfCircle || !singleRotationEnabled || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode rotates the phase mask, not the ROI geometry." : (!isRingOfCircle ? "Used only for ring_of_circle." : (!singleRotationEnabled ? "Enable Single Rotation Offset to use this." : "")),
   );
   setFieldDisabled(
     "ring_rotation_sweep_max",
-    !isRingOfCircle || !ringRotationSweepEnabled,
-    !isRingOfCircle ? "Used only for ring_of_circle." : (!ringRotationSweepEnabled ? "Enable Rotation Sweep to use this." : ""),
+    !isRingOfCircle || !ringRotationSweepEnabled || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode uses Phase Step for equal angular spacing." : (!isRingOfCircle ? "Used only for ring_of_circle." : (!ringRotationSweepEnabled ? "Enable Rotation Sweep to use this." : "")),
   );
   setFieldDisabled(
     "ring_rotation_sweep_step",
-    !isRingOfCircle || !ringRotationSweepEnabled,
-    !isRingOfCircle ? "Used only for ring_of_circle." : (!ringRotationSweepEnabled ? "Enable Rotation Sweep to use this." : ""),
+    !isRingOfCircle || !ringRotationSweepEnabled || isMaskRotation,
+    isMaskRotation ? "Mask rotation mode uses Phase Step for equal angular spacing." : (!isRingOfCircle ? "Used only for ring_of_circle." : (!ringRotationSweepEnabled ? "Enable Rotation Sweep to use this." : "")),
   );
+  setFieldDisabled(
+    "phase_cycles",
+    isMaskRotation,
+    isMaskRotation ? "Mask rotation mode always uses one full 360 deg turn." : "",
+  );
+  setFieldDisabled(
+    "roi_size_min",
+    roiSizeIgnored,
+    roiSizeIgnored ? "ROI size is not part of whole-focal-plane modulation." : "",
+  );
+  setFieldDisabled(
+    "roi_size_max",
+    roiSizeIgnored,
+    roiSizeIgnored ? "ROI size is not part of whole-focal-plane modulation." : "",
+  );
+  setFieldDisabled(
+    "roi_size_step",
+    roiSizeIgnored,
+    roiSizeIgnored ? "ROI size is not part of whole-focal-plane modulation." : "",
+  );
+  const posMapFields = document.getElementById("planet_position_map_sweep_fields");
+  if (posMapSweepEnabled) posMapFields.classList.remove("is-hidden");
+  else posMapFields.classList.add("is-hidden");
   const posRoiFields = document.getElementById("planet_position_roi_sweep_fields");
   if (roiSweepEnabled || posRoiSweepEnabled) posRoiFields.classList.remove("is-hidden");
   else posRoiFields.classList.add("is-hidden");
+  const fluxMapFields = document.getElementById("planet_flux_ratio_map_sweep_fields");
+  if (fluxMapSweepEnabled) fluxMapFields.classList.remove("is-hidden");
+  else fluxMapFields.classList.add("is-hidden");
+  const stepSweepFields = document.getElementById("mask_rotation_phase_step_sweep_fields");
+  if (stepSweepEnabled) stepSweepFields.classList.remove("is-hidden");
+  else stepSweepFields.classList.add("is-hidden");
+  const posBrightnessFields = document.getElementById("planet_position_brightness_sweep_fields");
+  if (posBrightnessSweepEnabled) posBrightnessFields.classList.remove("is-hidden");
+  else posBrightnessFields.classList.add("is-hidden");
   setMaskVisibility();
   setSpiderVisibility();
+  setCoherentRingSpeckleVisibility();
+  setLyotReferenceVisibility();
   updateChoiceButtons();
 }
 setInterval(tick, 500);
-document.getElementById("phase_mask_type").addEventListener("change", setMaskVisibility);
+document.getElementById("phase_mask_type").addEventListener("change", tick);
 document.getElementById("spiders_enabled").addEventListener("change", tick);
+document.getElementById("coherent_ring_speckles_enabled").addEventListener("change", tick);
 document.getElementById("roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("roi_size_sweep"); tick(); });
+document.getElementById("planet_position_map_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_position_map_sweep"); tick(); });
 document.getElementById("planet_position_roi_size_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_position_roi_size_sweep"); tick(); });
+document.getElementById("planet_flux_ratio_map_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_flux_ratio_map_sweep"); tick(); });
+document.getElementById("mask_rotation_phase_step_sweep").addEventListener("change", () => { makeSweepModesExclusive("mask_rotation_phase_step_sweep"); tick(); });
+document.getElementById("planet_position_brightness_sweep").addEventListener("change", () => { makeSweepModesExclusive("planet_position_brightness_sweep"); tick(); });
 document.getElementById("region_shape").addEventListener("change", tick);
 document.getElementById("enable_ring_of_circle_sweep").addEventListener("change", tick);
 document.getElementById("enable_ring_rotation_sweep").addEventListener("change", tick);
@@ -901,7 +1147,101 @@ class Runner:
             self.log.clear()
 
     def build_cmd(self, payload: dict) -> list[str]:
-        cmd = [sys.executable, "-m", "coronagraph.cli", "--feature", "coc-planet-phase"]
+        cmd = [sys.executable, "-m", "coronagraph.cli", "--feature", "cdi-planet-phase"]
+        payload = dict(payload)
+        payload.setdefault("lyot_reference_percent", "100")
+        payload.setdefault("lyot_reference_percent_sweep_min", payload.get("lyot_reference_percent", "100"))
+        payload.setdefault("lyot_reference_percent_sweep_max", payload.get("lyot_reference_percent", "100"))
+        payload.setdefault("lyot_reference_percent_sweep_step", "0")
+        if str(payload.get("coherent_ring_speckles_enabled", "off")).strip().lower() != "on":
+            payload["coherent_ring_speckle_count"] = "0"
+        if bool(payload.get("planet_position_map_sweep", False)):
+            payload["planet_position_radius_min"] = payload.get(
+                "planet_position_radius_min_map",
+                payload.get("planet_position_radius_min", "0.5"),
+            )
+            payload["planet_position_radius_max"] = payload.get(
+                "planet_position_radius_max_map",
+                payload.get("planet_position_radius_max", "4.0"),
+            )
+            payload["planet_position_radius_step"] = payload.get(
+                "planet_position_radius_step_map",
+                payload.get("planet_position_radius_step", "0.5"),
+            )
+            payload["planet_position_theta_min_deg"] = payload.get(
+                "planet_position_theta_min_deg_map",
+                payload.get("planet_position_theta_min_deg", "-180.0"),
+            )
+            payload["planet_position_theta_max_deg"] = payload.get(
+                "planet_position_theta_max_deg_map",
+                payload.get("planet_position_theta_max_deg", "180.0"),
+            )
+            payload["planet_position_theta_step_deg"] = payload.get(
+                "planet_position_theta_step_deg_map",
+                payload.get("planet_position_theta_step_deg", "15.0"),
+            )
+        elif bool(payload.get("planet_position_roi_size_sweep", False)):
+            payload["planet_position_radius_min"] = payload.get(
+                "planet_position_radius_min_roi",
+                payload.get("planet_position_radius_min", "0.5"),
+            )
+            payload["planet_position_radius_max"] = payload.get(
+                "planet_position_radius_max_roi",
+                payload.get("planet_position_radius_max", "4.0"),
+            )
+            payload["planet_position_radius_step"] = payload.get(
+                "planet_position_radius_step_roi",
+                payload.get("planet_position_radius_step", "0.5"),
+            )
+            payload["planet_position_theta_min_deg"] = payload.get(
+                "planet_position_theta_min_deg_roi",
+                payload.get("planet_position_theta_min_deg", "-180.0"),
+            )
+            payload["planet_position_theta_max_deg"] = payload.get(
+                "planet_position_theta_max_deg_roi",
+                payload.get("planet_position_theta_max_deg", "180.0"),
+            )
+            payload["planet_position_theta_step_deg"] = payload.get(
+                "planet_position_theta_step_deg_roi",
+                payload.get("planet_position_theta_step_deg", "15.0"),
+            )
+            payload["lyot_reference_percent_sweep_min"] = payload.get(
+                "lyot_reference_percent_min_roi",
+                payload.get("lyot_reference_percent", "100"),
+            )
+            payload["lyot_reference_percent_sweep_max"] = payload.get(
+                "lyot_reference_percent_max_roi",
+                payload.get("lyot_reference_percent", "100"),
+            )
+            payload["lyot_reference_percent_sweep_step"] = payload.get(
+                "lyot_reference_percent_step_roi",
+                "0",
+            )
+        elif bool(payload.get("planet_position_brightness_sweep", False)):
+            payload["planet_position_radius_min"] = payload.get(
+                "planet_position_radius_min_brightness",
+                payload.get("planet_position_radius_min", "0.5"),
+            )
+            payload["planet_position_radius_max"] = payload.get(
+                "planet_position_radius_max_brightness",
+                payload.get("planet_position_radius_max", "4.0"),
+            )
+            payload["planet_position_radius_step"] = payload.get(
+                "planet_position_radius_step_brightness",
+                payload.get("planet_position_radius_step", "0.5"),
+            )
+            payload["planet_position_theta_min_deg"] = payload.get(
+                "planet_position_theta_min_deg_brightness",
+                payload.get("planet_position_theta_min_deg", "-180.0"),
+            )
+            payload["planet_position_theta_max_deg"] = payload.get(
+                "planet_position_theta_max_deg_brightness",
+                payload.get("planet_position_theta_max_deg", "180.0"),
+            )
+            payload["planet_position_theta_step_deg"] = payload.get(
+                "planet_position_theta_step_deg_brightness",
+                payload.get("planet_position_theta_step_deg", "15.0"),
+            )
         args_map = {
             "phase_mask_type": "--phase-mask-type",
             "roddier_mask_radius": "--roddier-mask-radius",
@@ -922,7 +1262,10 @@ class Runner:
             "phase_step": "--phase-step",
             "phase_cycles": "--phase-cycles",
             "secondary_ratio_local": "--secondary-ratio-local",
+            "lyot_reference_percent": "--lyot-reference-percent",
             "planet_flux_ratio_local": "--planet-flux-ratio-local",
+            "coherent_ring_speckle_count": "--coherent-ring-speckle-count",
+            "coherent_ring_speckle_intensity": "--coherent-ring-speckle-intensity",
             "roi_size_min": "--roi-size-min",
             "roi_size_max": "--roi-size-max",
             "roi_size_step": "--roi-size-step",
@@ -932,6 +1275,15 @@ class Runner:
             "planet_position_theta_min_deg": "--planet-position-theta-min-deg",
             "planet_position_theta_max_deg": "--planet-position-theta-max-deg",
             "planet_position_theta_step_deg": "--planet-position-theta-step-deg",
+            "lyot_reference_percent_sweep_min": "--lyot-reference-percent-sweep-min",
+            "lyot_reference_percent_sweep_max": "--lyot-reference-percent-sweep-max",
+            "lyot_reference_percent_sweep_step": "--lyot-reference-percent-sweep-step",
+            "planet_flux_ratio_sweep_min": "--planet-flux-ratio-sweep-min",
+            "planet_flux_ratio_sweep_max": "--planet-flux-ratio-sweep-max",
+            "planet_flux_ratio_sweep_step": "--planet-flux-ratio-sweep-step",
+            "phase_step_sweep_min": "--phase-step-sweep-min",
+            "phase_step_sweep_max": "--phase-step-sweep-max",
+            "phase_step_sweep_step": "--phase-step-sweep-step",
         }
         for key, flag in args_map.items():
             value = payload.get(key, "")
@@ -959,8 +1311,16 @@ class Runner:
 
         if bool(payload.get("roi_size_sweep", False)):
             cmd.append("--roi-size-sweep")
+        if bool(payload.get("planet_position_map_sweep", False)):
+            cmd.append("--planet-position-map-sweep")
         if bool(payload.get("planet_position_roi_size_sweep", False)):
             cmd.append("--planet-position-roi-size-sweep")
+        if bool(payload.get("planet_flux_ratio_map_sweep", False)):
+            cmd.append("--planet-flux-ratio-map-sweep")
+        if bool(payload.get("mask_rotation_phase_step_sweep", False)):
+            cmd.append("--mask-rotation-phase-step-sweep")
+        if bool(payload.get("planet_position_brightness_sweep", False)):
+            cmd.append("--planet-position-brightness-sweep")
         if bool(payload.get("enable_ring_rotation_sweep", False)):
             cmd.append("--ring-rotation-sweep")
 
@@ -975,6 +1335,8 @@ class Runner:
         for key, flag in [
             ("disable_ghost", "--disable-ghost"),
             ("disable_interference", "--disable-interference"),
+            ("disable_star", "--disable-star"),
+            ("disable_companion", "--disable-companion"),
             ("disable_companion_ghost", "--disable-companion-ghost"),
             ("build_map_per_fov", "--build-map-per-fov"),
             ("plot_poster_figure", "--plot-poster-figure"),

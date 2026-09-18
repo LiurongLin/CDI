@@ -8,8 +8,8 @@ import time
 import numpy as np
 
 if __package__:
-    from .coc_feature import run_coc_planet_phase
-    from .masks import PhaseMask, RoddierPhaseMask, VortexPhaseMask
+    from .cdi_feature import run_cdi_planet_phase
+    from .masks import NoPhaseMask, PhaseMask, RoddierPhaseMask, VortexPhaseMask
     from .plotting import (
         plot_local_region0_peak_fft,
         plot_local_region_phase_peak_metrics,
@@ -20,11 +20,11 @@ if __package__:
     )
     from .region_shapes import normalize_region_shape
     from .simulator import CoronagraphSimulator, resolve_phase_screen_path
-    from .sweeps import sweep_roddier_phase_for_peak_match, sweep_roddier_radius_for_peak_match
+    from .roddier_sweeps import sweep_roddier_phase_for_peak_match, sweep_roddier_radius_for_peak_match
 else:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from coronagraph.coc_feature import run_coc_planet_phase
-    from coronagraph.masks import PhaseMask, RoddierPhaseMask, VortexPhaseMask
+    from coronagraph.cdi_feature import run_cdi_planet_phase
+    from coronagraph.masks import NoPhaseMask, PhaseMask, RoddierPhaseMask, VortexPhaseMask
     from coronagraph.plotting import (
         plot_local_region0_peak_fft,
         plot_local_region_phase_peak_metrics,
@@ -34,7 +34,7 @@ else:
         save_phase_mask_fits,
     )
     from coronagraph.simulator import CoronagraphSimulator, resolve_phase_screen_path
-    from coronagraph.sweeps import (
+    from coronagraph.roddier_sweeps import (
         sweep_roddier_phase_for_peak_match,
         sweep_roddier_radius_for_peak_match,
     )
@@ -59,7 +59,11 @@ def default_sim_kwargs() -> dict:
         ghost_coherence=1.0,
         include_ghost=True,
         include_interference=True,
+        include_star=True,
+        include_companion=True,
         include_companion_ghost=True,
+        coherent_ring_speckle_count=0,
+        coherent_ring_speckle_intensity=1.0,
         companion_flux_ratio=0.0,
         companion_offset_lamD=(0.0, 0.0),
         e_final_phase_offset=np.pi,
@@ -69,6 +73,7 @@ def default_sim_kwargs() -> dict:
         pupil_supersample=1,
         phase_screen_path=None,
         phase_screen_index=0,
+        lyot_reference_scale=1.0,
     )
 
 
@@ -77,15 +82,32 @@ def mask_filename_suffix(mask: PhaseMask) -> str:
     if isinstance(mask, RoddierPhaseMask):
         radius = f"{mask.radius_lamD:.4f}".replace(".", "p")
         phase = f"{mask.phase_rad:.6f}".replace(".", "p")
-        return f"_radius_{radius}_phase_{phase}"
+        return f"_r{radius}_p{phase}"
     if isinstance(mask, VortexPhaseMask):
-        return f"_charge_{int(mask.charge)}"
+        return f"_c{int(mask.charge)}"
     return ""
 
 
 def float_filename_token(value: float, precision: int = 3) -> str:
     """Format a float into a filename-safe token."""
     return f"{float(value):.{int(precision)}f}".replace(".", "p")
+
+
+def _shape_tag(region_shape: str) -> str:
+    return {
+        "circle": "cir",
+        "ring": "rng",
+        "ring_of_circle": "roc",
+    }.get(str(region_shape).strip().lower(), str(region_shape).strip().lower())
+
+
+def _mode_tag(mode_name: str) -> str:
+    return {
+        "regional": "reg",
+        "global": "gbl",
+        "focal_plane": "fpl",
+        "mask_rotation": "mrot",
+    }.get(str(mode_name).strip().lower(), str(mode_name).strip().lower())
 
 
 def build_phase_mask(args: argparse.Namespace) -> PhaseMask:
@@ -97,6 +119,8 @@ def build_phase_mask(args: argparse.Namespace) -> PhaseMask:
         )
     if mask_type == "vortex":
         return VortexPhaseMask(charge=int(args.vortex_charge))
+    if mask_type in {"perfect_corongraph", "perfect_coronagraph"}:
+        return NoPhaseMask()
     raise ValueError(f"Unsupported phase-mask type: {mask_type}")
 
 
@@ -105,6 +129,9 @@ def print_run_header(result: dict) -> None:
     print(f"Focal-plane sampling: {result['focal_sampling']} px/(λ/D)")
     print(f"Phase-mask sampling: {result['phase_mask_sampling']} px/(λ/D)")
     print(f"Phase mask: {result['phase_mask_name']}")
+    print(f"Perfect coronagraph: {result.get('perfect_coronagraph', False)}")
+    if result.get("perfect_coronagraph", False):
+        print(f"Lyot reference subtraction: {result.get('lyot_reference_scale', 1.0) * 100.0:.3f}%")
     print(f"Ghost fraction: {result['ghost_fraction'] * 100:.3f}% of {result['ghost_source']} PSF")
     print(f"Ghost offset: {result['ghost_offset_lamD']} λ/D")
     print(f"Global focal shift: {result['focal_shift_pixels']} px")
@@ -112,9 +139,15 @@ def print_run_header(result: dict) -> None:
     print(f"Ghost coherence gamma: {result['ghost_coherence']:.3f}")
     print(f"Ghost enabled: {result.get('include_ghost', True)}")
     print(f"Interference enabled: {result.get('include_interference', True)}")
+    print(f"Star enabled: {result.get('include_star', True)}")
+    print(f"Companion enabled: {result.get('include_companion', True)}")
     print(f"Companion ghost enabled: {result.get('include_companion_ghost', True)}")
     print(f"Companion flux ratio: {result['companion_flux_ratio']:.3e}")
     print(f"Companion offset: {result['companion_offset_lamD']} λ/D")
+    print(f"Coherent ring speckle count: {result.get('coherent_ring_speckle_count', 0)}")
+    print(f"Coherent ring speckle intensity: {result.get('coherent_ring_speckle_intensity', 1.0):.3e}")
+    if result.get("coherent_ring_speckle_offsets_lamD"):
+        print(f"Coherent ring speckle offsets: {result['coherent_ring_speckle_offsets_lamD']} λ/D")
     print("e_final_phase_offset: {:.3f} rad".format(result["e_final_phase_offset"]))
     print(f"Secondary diameter ratio: {result['secondary_diameter_ratio']:.3f}")
     print(f"Spider width: {result['spider_width_pixels']:.3f} px")
@@ -174,6 +207,7 @@ def parse_args() -> argparse.Namespace:
             "phase-match",
             "local-region-phase",
             "local-region-phase-ft",
+            "cdi-planet-phase",
             "coc-planet-phase",
             "all",
         ],
@@ -220,9 +254,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--phase-mask-type",
-        choices=["roddier", "vortex"],
+        choices=["roddier", "vortex", "perfect_corongraph", "perfect_coronagraph"],
         default="roddier",
-        help="Phase mask model used by features (single/phase/combined/local/coc).",
+        help="Phase mask model used by features (single/phase/combined/local/cdi).",
     )
     parser.add_argument(
         "--roddier-mask-radius",
@@ -257,6 +291,19 @@ def parse_args() -> argparse.Namespace:
         "--disable-interference",
         action="store_true",
         help="Disable coherent interference term (keeps ghost intensity-only if ghost is enabled).",
+    )
+    parser.add_argument(
+        "--disable-star",
+        action="store_true",
+        help="Disable the stellar branch while keeping the companion/planet branch.",
+    )
+    parser.add_argument(
+        "--disable-companion",
+        action="store_true",
+        help=(
+            "Disable the companion/planet branch while keeping its flux ratio as the "
+            "coherent ring speckle calibration target."
+        ),
     )
     parser.add_argument(
         "--disable-companion-ghost",
@@ -315,6 +362,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--coherent-ring-speckle-count",
+        type=int,
+        default=0,
+        help=(
+            "Number of extra coherent speckles to place on the same angular-separation ring "
+            "as the planet, equally spaced in azimuth."
+        ),
+    )
+    parser.add_argument(
+        "--coherent-ring-speckle-intensity",
+        type=float,
+        default=1.0,
+        help=(
+            "Input intensity of each coherent ring speckle relative to the star source. "
+            "Use 1.0 for one star intensity."
+        ),
+    )
+    parser.add_argument(
+        "--lyot-reference-percent",
+        type=float,
+        default=100.0,
+        help=(
+            "Percentage of the perfect-coronagraph reference wavefront to subtract at the Lyot plane. "
+            "Used only with --phase-mask-type perfect_corongraph/perfect_coronagraph."
+        ),
+    )
+    parser.add_argument(
         "--incoherence-map-mode",
         choices=["fft_band", "lab_fft_ratio"],
         default="fft_band",
@@ -339,9 +413,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--phase-sweep-mode",
-        choices=["regional", "global"],
+        choices=["regional", "global", "focal_plane", "mask_rotation"],
         default="regional",
-        help="Phase sweep mode: regional (local focal-plane regions) or global (e_final_phase_offset).",
+        help=(
+            "Phase sweep mode: regional (local focal-plane regions), "
+            "global/focal_plane (whole focal-plane phase offset), or mask_rotation "
+            "(rotate the focal-plane phase mask once per run)."
+        ),
     )
     parser.add_argument(
         "--local-outward-step",
@@ -477,9 +555,47 @@ def parse_args() -> argparse.Namespace:
         help="ROI radius step [λ/D] for ROI-size sweep.",
     )
     parser.add_argument(
+        "--planet-position-map-sweep",
+        action="store_true",
+        help="Enable a planet-location sweep with fixed ROI size and fixed planet flux ratio.",
+    )
+    parser.add_argument(
         "--planet-position-roi-size-sweep",
         action="store_true",
         help="Enable a 2D sweep over planet (radius, theta) location and ROI size.",
+    )
+    parser.add_argument(
+        "--lyot-reference-percent-sweep-min",
+        type=float,
+        default=100.0,
+        help="Minimum Lyot-reference subtraction percentage for the planet-position/ROI-size sweep.",
+    )
+    parser.add_argument(
+        "--lyot-reference-percent-sweep-max",
+        type=float,
+        default=100.0,
+        help="Maximum Lyot-reference subtraction percentage for the planet-position/ROI-size sweep.",
+    )
+    parser.add_argument(
+        "--lyot-reference-percent-sweep-step",
+        type=float,
+        default=0.0,
+        help="Lyot-reference subtraction percentage step for the planet-position/ROI-size sweep.",
+    )
+    parser.add_argument(
+        "--planet-flux-ratio-map-sweep",
+        action="store_true",
+        help="Enable a planet-brightness sweep with fixed location and fixed ROI size.",
+    )
+    parser.add_argument(
+        "--mask-rotation-phase-step-sweep",
+        action="store_true",
+        help="Enable a mask-rotation step-count sweep with fixed planet location, brightness, and ROI size.",
+    )
+    parser.add_argument(
+        "--planet-position-brightness-sweep",
+        action="store_true",
+        help="Enable a sweep over planet (radius, theta) location and planet flux ratio.",
     )
     parser.add_argument(
         "--planet-position-radius-min",
@@ -517,12 +633,48 @@ def parse_args() -> argparse.Namespace:
         default=15.0,
         help="Planet theta step [deg] for the 2D planet-position sweep.",
     )
-    parser.add_argument("--coc-phase-samples", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--coc-phase-cycles", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--coc-planet-offset-x", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--coc-planet-offset-y", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--coc-secondary-ratio", type=float, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--coc-planet-flux-ratio", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--planet-flux-ratio-sweep-min",
+        type=float,
+        default=0.001,
+        help="Minimum planet flux ratio for the planet-position/brightness sweep.",
+    )
+    parser.add_argument(
+        "--planet-flux-ratio-sweep-max",
+        type=float,
+        default=0.010,
+        help="Maximum planet flux ratio for the planet-position/brightness sweep.",
+    )
+    parser.add_argument(
+        "--planet-flux-ratio-sweep-step",
+        type=float,
+        default=0.001,
+        help="Planet flux-ratio step for the planet-position/brightness sweep.",
+    )
+    parser.add_argument(
+        "--phase-step-sweep-min",
+        type=int,
+        default=4,
+        help="Minimum phase-step count for the mask-rotation step sweep.",
+    )
+    parser.add_argument(
+        "--phase-step-sweep-max",
+        type=int,
+        default=24,
+        help="Maximum phase-step count for the mask-rotation step sweep.",
+    )
+    parser.add_argument(
+        "--phase-step-sweep-step",
+        type=int,
+        default=4,
+        help="Phase-step increment for the mask-rotation step sweep.",
+    )
+    parser.add_argument("--cdi-phase-samples", "--coc-phase-samples", dest="cdi_phase_samples", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-phase-cycles", "--coc-phase-cycles", dest="cdi_phase_cycles", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-planet-offset-x", "--coc-planet-offset-x", dest="cdi_planet_offset_x", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-planet-offset-y", "--coc-planet-offset-y", dest="cdi_planet_offset_y", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-secondary-ratio", "--coc-secondary-ratio", dest="cdi_secondary_ratio", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-planet-flux-ratio", "--coc-planet-flux-ratio", dest="cdi_planet_flux_ratio", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--build-map-per-fov",
         action="store_true",
@@ -533,13 +685,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="For the 2D planet-position ROI sweep, emit poster-styled coherence/incoherence PDFs only.",
     )
-    parser.add_argument("--coc-fov-position-steps", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--coc-fov-circle-of-circles-trace", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-fov-position-steps", "--coc-fov-position-steps", dest="cdi_fov_position_steps", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--cdi-fov-orbit-trace", "--cdi-fov-circle-of-circles-trace", "--coc-fov-circle-of-circles-trace", dest="cdi_fov_orbit_trace", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def _resolve_features(args: argparse.Namespace) -> set[str]:
-    features = set(args.feature)
+    features = {("cdi-planet-phase" if item == "coc-planet-phase" else item) for item in args.feature}
     if "all" in features:
         return {
             "single",
@@ -549,7 +701,7 @@ def _resolve_features(args: argparse.Namespace) -> set[str]:
             "phase-match",
             "local-region-phase",
             "local-region-phase-ft",
-            "coc-planet-phase",
+            "cdi-planet-phase",
         }
     return features
 
@@ -566,34 +718,46 @@ def _build_sim_kwargs(args: argparse.Namespace) -> dict:
     sim_kwargs["pupil_supersample"] = int(args.pupil_ss)
     sim_kwargs["phase_screen_path"] = resolve_phase_screen_path(args.phase_screen_jitter)
     sim_kwargs["phase_screen_index"] = 0
+    sim_kwargs["coherent_ring_speckle_count"] = int(args.coherent_ring_speckle_count)
+    sim_kwargs["coherent_ring_speckle_intensity"] = float(args.coherent_ring_speckle_intensity)
+    sim_kwargs["lyot_reference_scale"] = float(args.lyot_reference_percent) / 100.0
     sim_kwargs["companion_flux_ratio"] = float(args.planet_flux_ratio)
     sim_kwargs["companion_offset_lamD"] = (float(args.planet_offset_x), float(args.planet_offset_y))
     sim_kwargs["include_ghost"] = not bool(args.disable_ghost)
     sim_kwargs["include_interference"] = (not bool(args.disable_interference)) and sim_kwargs["include_ghost"]
+    sim_kwargs["include_star"] = not bool(args.disable_star)
+    sim_kwargs["include_companion"] = not bool(args.disable_companion)
     sim_kwargs["include_companion_ghost"] = not bool(args.disable_companion_ghost)
+    sim_kwargs["perfect_coronagraph"] = str(args.phase_mask_type).lower() in {
+        "perfect_corongraph",
+        "perfect_coronagraph",
+    }
     sim_kwargs["phase_mask"] = build_phase_mask(args)
     return sim_kwargs
 
 
 def _build_output_tags(args: argparse.Namespace, sim_kwargs: dict) -> tuple[str, str, str, str, str]:
     mask_suffix = mask_filename_suffix(sim_kwargs["phase_mask"])
-    if isinstance(sim_kwargs["phase_mask"], VortexPhaseMask):
-        mask_output_tag = f"vortex_charge_{int(sim_kwargs['phase_mask'].charge)}"
+    if bool(sim_kwargs.get("perfect_coronagraph", False)):
+        mask_output_tag = "pcg"
+    elif isinstance(sim_kwargs["phase_mask"], VortexPhaseMask):
+        mask_output_tag = f"vx{int(sim_kwargs['phase_mask'].charge)}"
     else:
-        mask_output_tag = f"{sim_kwargs['phase_mask'].__class__.__name__}{mask_suffix}"
+        mask_output_tag = f"rd{mask_suffix}"
     effective_cycles = float(args.phase_cycles)
-    phase_cycles_tag = f"_cycles_{float_filename_token(effective_cycles, precision=3)}"
-    phase_sweep_mode_tag = f"_mode_{str(args.phase_sweep_mode).strip().lower()}"
+    mode_name = str(args.phase_sweep_mode).strip().lower()
+    if mode_name == "mask_rotation":
+        phase_cycles_tag = f"_rs{int(args.phase_step)}"
+    else:
+        phase_cycles_tag = f"_cy{float_filename_token(effective_cycles, precision=3)}"
+    phase_sweep_mode_tag = f"_m{_mode_tag(mode_name)}"
     region_shape = str(args.region_shape).strip().lower()
     if region_shape == "ring_of_circle":
         rotation_tag = float_filename_token(float(getattr(args, "ring_rotation_fraction", 0.0)), precision=3)
-        single_region_tag = f"_shape_{region_shape}_rotfrac_{rotation_tag}"
+        single_region_tag = f"_{_shape_tag(region_shape)}rf{rotation_tag}"
     else:
-        single_region_tag = (
-            f"_fovsim_{int(args.fov_count)}_fovcenters_{int(args.fov_centers_count)}"
-            f"_shape_{region_shape}"
-        )
-    ghost_suffix = f"_ghost_{'on' if sim_kwargs['include_ghost'] else 'off'}"
+        single_region_tag = f"_f{int(args.fov_count)}c{int(args.fov_centers_count)}{_shape_tag(region_shape)}"
+    ghost_suffix = f"_g{1 if sim_kwargs['include_ghost'] else 0}"
     return mask_output_tag, phase_cycles_tag, phase_sweep_mode_tag, single_region_tag, ghost_suffix
 
 
@@ -610,18 +774,20 @@ def _parse_manual_centers(args: argparse.Namespace) -> list[tuple[float, float]]
 
 def main() -> None:
     args = parse_args()
-    if args.coc_phase_samples is not None:
-        args.phase_step = int(args.coc_phase_samples)
-    if args.coc_phase_cycles is not None:
-        args.phase_cycles = float(args.coc_phase_cycles)
-    if args.coc_planet_offset_x is not None:
-        args.planet_offset_x_local = float(args.coc_planet_offset_x)
-    if args.coc_planet_offset_y is not None:
-        args.planet_offset_y_local = float(args.coc_planet_offset_y)
-    if args.coc_secondary_ratio is not None:
-        args.secondary_ratio_local = float(args.coc_secondary_ratio)
-    if args.coc_planet_flux_ratio is not None:
-        args.planet_flux_ratio_local = float(args.coc_planet_flux_ratio)
+    if args.cdi_phase_samples is not None:
+        args.phase_step = int(args.cdi_phase_samples)
+    if args.cdi_phase_cycles is not None:
+        args.phase_cycles = float(args.cdi_phase_cycles)
+    if args.cdi_planet_offset_x is not None:
+        args.planet_offset_x_local = float(args.cdi_planet_offset_x)
+    if args.cdi_planet_offset_y is not None:
+        args.planet_offset_y_local = float(args.cdi_planet_offset_y)
+    if args.cdi_secondary_ratio is not None:
+        args.secondary_ratio_local = float(args.cdi_secondary_ratio)
+    if args.cdi_planet_flux_ratio is not None:
+        args.planet_flux_ratio_local = float(args.cdi_planet_flux_ratio)
+    args.coc_fov_position_steps = int(getattr(args, "cdi_fov_position_steps", 0))
+    args.coc_fov_circle_of_circles_trace = bool(getattr(args, "cdi_fov_orbit_trace", False))
     if bool(args.gui):
         if __package__:
             from .gui import main as gui_main
@@ -741,8 +907,8 @@ def main() -> None:
         print(f"Saved all-region FFT plot: {out}")
         print(f"Sampled {len(fft_result['region_center_pixels_yx'])} center pixels.")
 
-    if "coc-planet-phase" in features:
-        run_coc_planet_phase(
+    if "cdi-planet-phase" in features:
+        run_cdi_planet_phase(
             args=args,
             sim_kwargs=sim_kwargs,
             mask_output_tag=mask_output_tag,
