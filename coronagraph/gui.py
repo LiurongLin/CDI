@@ -60,6 +60,7 @@ Optics/Pupil
 Flags
 - Disable Ghost.
 - Disable Interference.
+- Disable Companion.
 - Disable Companion Ghost.
 - Build Map per FOV.
 """
@@ -491,6 +492,7 @@ HTML = """<!doctype html>
     <div class="field"><label>Planet Flux Ratio</label><input id="planet_flux_ratio_local" value="0.01" /></div>
     <div class="field"><label>Enable Coherent Ring Speckles</label><select id="coherent_ring_speckles_enabled"><option value="off" selected>off</option><option value="on">on</option></select></div>
     <div class="field"><label>Coherent Ring Speckles</label><input id="coherent_ring_speckle_count" value="0" /></div>
+    <div class="field"><label>Speckle Intensity <span class="tip" title="Input intensity per coherent speckle relative to the star source; 1 means one star intensity.">?</span></label><input id="coherent_ring_speckle_intensity" value="1.0" /></div>
     <div class="field"><label>Lyot Reference Subtraction <span class="unit">%</span></label><input id="lyot_reference_percent" value="100" /></div>
   </div>
   </div>
@@ -637,6 +639,8 @@ HTML = """<!doctype html>
   <div class="checks">
     <label><input type="checkbox" id="disable_ghost" /> Disable Ghost</label>
     <label><input type="checkbox" id="disable_interference" /> Disable Interference</label>
+    <label><input type="checkbox" id="disable_star" /> Disable Star</label>
+    <label><input type="checkbox" id="disable_companion" /> Disable Companion</label>
     <label><input type="checkbox" id="disable_companion_ghost" /> Disable Companion Ghost</label>
     <label><input type="checkbox" id="build_map_per_fov" /> Build Map per FOV</label>
     <label><input type="checkbox" id="plot_poster_figure" /> Plot Poster Figure</label>
@@ -665,7 +669,7 @@ const fields = [
   "single_region_ring_radius","enable_ring_of_circle_sweep","enable_ring_rotation_sweep",
   "ring_rotation_fraction","ring_rotation_sweep_max","ring_rotation_sweep_step","phase_step",
   "phase_cycles","planet_offset_radius_local","planet_offset_theta_deg_local","secondary_ratio_local","lyot_reference_percent","coherent_ring_speckles_enabled",
-  "planet_flux_ratio_local","coherent_ring_speckle_count","roi_size_sweep","roi_size_min","roi_size_max","roi_size_step",
+  "planet_flux_ratio_local","coherent_ring_speckle_count","coherent_ring_speckle_intensity","roi_size_sweep","roi_size_min","roi_size_max","roi_size_step",
   "planet_position_map_sweep",
   "planet_position_radius_min_map","planet_position_radius_max_map","planet_position_radius_step_map",
   "planet_position_theta_min_deg_map","planet_position_theta_max_deg_map","planet_position_theta_step_deg_map",
@@ -678,7 +682,7 @@ const fields = [
   "planet_position_theta_min_deg_brightness","planet_position_theta_max_deg_brightness","planet_position_theta_step_deg_brightness",
   "planet_flux_ratio_sweep_min","planet_flux_ratio_sweep_max","planet_flux_ratio_sweep_step",
   "disable_ghost","disable_interference",
-  "disable_companion_ghost","build_map_per_fov","plot_poster_figure"
+  "disable_star","disable_companion","disable_companion_ghost","build_map_per_fov","plot_poster_figure"
 ];
 
 function collect() {
@@ -731,6 +735,11 @@ function setCoherentRingSpeckleVisibility() {
   const enabled = document.getElementById("coherent_ring_speckles_enabled").value === "on";
   setFieldDisabled(
     "coherent_ring_speckle_count",
+    !enabled,
+    enabled ? "" : "Ignored when coherent ring speckles are off.",
+  );
+  setFieldDisabled(
+    "coherent_ring_speckle_intensity",
     !enabled,
     enabled ? "" : "Ignored when coherent ring speckles are off.",
   );
@@ -1256,6 +1265,7 @@ class Runner:
             "lyot_reference_percent": "--lyot-reference-percent",
             "planet_flux_ratio_local": "--planet-flux-ratio-local",
             "coherent_ring_speckle_count": "--coherent-ring-speckle-count",
+            "coherent_ring_speckle_intensity": "--coherent-ring-speckle-intensity",
             "roi_size_min": "--roi-size-min",
             "roi_size_max": "--roi-size-max",
             "roi_size_step": "--roi-size-step",
@@ -1325,6 +1335,8 @@ class Runner:
         for key, flag in [
             ("disable_ghost", "--disable-ghost"),
             ("disable_interference", "--disable-interference"),
+            ("disable_star", "--disable-star"),
+            ("disable_companion", "--disable-companion"),
             ("disable_companion_ghost", "--disable-companion-ghost"),
             ("build_map_per_fov", "--build-map-per-fov"),
             ("plot_poster_figure", "--plot-poster-figure"),

@@ -144,6 +144,72 @@ class GuiRunnerTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--phase-step-sweep-max") + 1], "16")
         self.assertEqual(cmd[cmd.index("--phase-step-sweep-step") + 1], "4")
 
+    def test_build_cmd_uses_source_disable_flags(self) -> None:
+        runner = Runner()
+        payload = {
+            "phase_mask_type": "vortex",
+            "roddier_mask_radius": "0.53",
+            "roddier_mask_phase": "3.141592653589793",
+            "vortex_charge": "2",
+            "spider_width": "0.25",
+            "pupil_ss": "8",
+            "phase_screen_jitter": "none",
+            "incoherence_map_mode": "fft_band",
+            "local_region_radius": "2.0",
+            "phase_sweep_mode": "regional",
+            "region_shape": "circle",
+            "fov_count": "1",
+            "fov_centers_count": "1",
+            "ring_rotation_fraction": "0.0",
+            "ring_rotation_sweep_max": "1.0",
+            "ring_rotation_sweep_step": "0.1",
+            "phase_step": "8",
+            "phase_cycles": "1.0",
+            "secondary_ratio_local": "0.25",
+            "lyot_reference_percent": "100",
+            "coherent_ring_speckles_enabled": "off",
+            "planet_flux_ratio_local": "0.01",
+            "coherent_ring_speckle_count": "0",
+            "roi_size_min": "0.5",
+            "roi_size_max": "3.0",
+            "roi_size_step": "0.25",
+            "planet_position_radius_min": "1.5",
+            "planet_position_radius_max": "2.5",
+            "planet_position_radius_step": "0.5",
+            "planet_position_theta_min_deg": "-45.0",
+            "planet_position_theta_max_deg": "45.0",
+            "planet_position_theta_step_deg": "15.0",
+            "planet_flux_ratio_sweep_min": "0.001",
+            "planet_flux_ratio_sweep_max": "0.005",
+            "planet_flux_ratio_sweep_step": "0.002",
+            "phase_step_sweep_min": "4",
+            "phase_step_sweep_max": "16",
+            "phase_step_sweep_step": "4",
+            "planet_offset_radius_local": "5.0",
+            "planet_offset_theta_deg_local": "180.0",
+            "spiders_enabled": "on",
+            "enable_ring_of_circle_sweep": False,
+            "enable_ring_rotation_sweep": False,
+            "roi_size_sweep": False,
+            "planet_position_map_sweep": False,
+            "planet_position_roi_size_sweep": False,
+            "planet_flux_ratio_map_sweep": False,
+            "mask_rotation_phase_step_sweep": False,
+            "planet_position_brightness_sweep": False,
+            "disable_ghost": False,
+            "disable_interference": False,
+            "disable_star": True,
+            "disable_companion": True,
+            "disable_companion_ghost": False,
+            "build_map_per_fov": False,
+            "plot_poster_figure": False,
+        }
+
+        cmd = runner.build_cmd(payload)
+
+        self.assertIn("--disable-star", cmd)
+        self.assertIn("--disable-companion", cmd)
+
     def test_build_cmd_uses_roi_sweep_specific_planet_position_fields(self) -> None:
         runner = Runner()
         payload = {
@@ -170,6 +236,7 @@ class GuiRunnerTests(unittest.TestCase):
             "coherent_ring_speckles_enabled": "on",
             "planet_flux_ratio_local": "0.005",
             "coherent_ring_speckle_count": "2",
+            "coherent_ring_speckle_intensity": "0.0025",
             "roi_size_min": "7",
             "roi_size_max": "7",
             "roi_size_step": "0",
@@ -217,6 +284,7 @@ class GuiRunnerTests(unittest.TestCase):
         self.assertIn("--planet-position-roi-size-sweep", cmd)
         self.assertEqual(cmd[cmd.index("--lyot-reference-percent") + 1], "65")
         self.assertEqual(cmd[cmd.index("--coherent-ring-speckle-count") + 1], "2")
+        self.assertEqual(cmd[cmd.index("--coherent-ring-speckle-intensity") + 1], "0.0025")
         self.assertEqual(cmd[cmd.index("--lyot-reference-percent-sweep-min") + 1], "40")
         self.assertEqual(cmd[cmd.index("--lyot-reference-percent-sweep-max") + 1], "80")
         self.assertEqual(cmd[cmd.index("--lyot-reference-percent-sweep-step") + 1], "20")

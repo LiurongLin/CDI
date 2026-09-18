@@ -30,11 +30,15 @@ from .cdi_analysis import (
     _theta_back_and_forth,
 )
 from .cdi_reports import (
+    _save_focal_plane_field_phase_grid_png,
     _save_focal_plane_phase_grid_png,
     _save_focal_plane_phase_shift_grid_png,
+    _save_grouped_roi_size_focal_plane_field_phase_pngs,
     _save_grouped_roi_size_focal_plane_pngs,
     _save_grouped_roi_size_focal_plane_phase_shift_pngs,
+    _save_grouped_roi_size_lyot_plane_field_phase_pngs,
     _save_lyot_plane_phase_grid_png,
+    _save_lyot_plane_field_phase_grid_png,
     _save_grouped_roi_size_lyot_plane_pngs,
     _save_map_panel_summary_png,
     _save_grouped_roi_size_coherence_pdfs,
@@ -73,9 +77,32 @@ def _roi_shape_folder_name(region_shape: str) -> str:
     return f"shape_{normalize_region_shape(region_shape)}"
 
 
+def _roi_shape_folder_parts_for_mode(region_shape: str, phase_sweep_mode: str) -> list[str]:
+    mode = str(phase_sweep_mode).strip().lower()
+    if mode == "mask_rotation" or _is_whole_focal_plane_phase_mode(mode):
+        return []
+    return [_roi_shape_folder_name(region_shape)]
+
+
 def _modulation_sweep_folder_name(phase_sweep_mode: str) -> str:
     mode = str(phase_sweep_mode).strip().lower()
     return f"mode_{mode}"
+
+
+def _source_state_folder_name(
+    include_star: bool,
+    include_companion: bool,
+    coherent_ring_speckle_count: int = 0,
+    coherent_ring_speckle_intensity: float = 1.0,
+) -> str:
+    star_state = "star_enabled" if bool(include_star) else "star_disabled"
+    companion_state = "planet_enabled" if bool(include_companion) else "planet_disabled"
+    speckles_enabled = (
+        int(coherent_ring_speckle_count) > 0
+        and float(coherent_ring_speckle_intensity) > 0.0
+    )
+    speckle_state = "speckles_enabled" if speckles_enabled else "speckles_disabled"
+    return f"{star_state}_{companion_state}_{speckle_state}"
 
 
 def _contrast_ratio_folder_name(contrast_ratio_token: str) -> str:
@@ -490,8 +517,8 @@ def _run_planet_position_roi_size_sweep(
                 if len(panels) > 0:
                     location_tag = (
                         (f"lr{_compact_float_tag(lyot_reference_percent)}_" if perfect_coronagraph else "")
-                        + f"r{_compact_float_tag(radius_lamD)}"
-                        + f"_t{_compact_float_tag(theta_deg)}"
+                        + f"planet_r_{_compact_float_tag(radius_lamD)}"
+                        + f"_theta_{_compact_float_tag(theta_deg)}"
                     )
                     location_dir = os.path.join(sweep_output_dir, location_tag)
                     os.makedirs(location_dir, exist_ok=True)
@@ -511,8 +538,7 @@ def _run_planet_position_roi_size_sweep(
                     )
                     location_pdf = os.path.join(
                         location_dir,
-                        "planet_position_roi_size_sweep_incoherence_maps_with_snr_24lamD_"
-                        f"{location_tag}",
+                        "planet_position_roi_size_sweep_incoherence_maps_with_snr_24lamD",
                     )
                     location_pdf = f"{location_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
                     _save_roi_size_incoherence_pdf_for_planet_location(
@@ -524,8 +550,7 @@ def _run_planet_position_roi_size_sweep(
                     )
                     location_coh_pdf = os.path.join(
                         location_dir,
-                        "planet_position_roi_size_sweep_coherence_maps_with_snr_24lamD_"
-                        f"{location_tag}",
+                        "planet_position_roi_size_sweep_coherence_maps_with_snr_24lamD",
                     )
                     location_coh_pdf = f"{location_coh_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
                     _save_roi_size_coherence_pdf_for_planet_location(
@@ -538,8 +563,7 @@ def _run_planet_position_roi_size_sweep(
                     if not poster_figure:
                         location_max_minus_coh_pdf = os.path.join(
                             location_dir,
-                            "planet_position_roi_size_sweep_max_minus_coherence_maps_24lamD_"
-                            f"{location_tag}",
+                            "planet_position_roi_size_sweep_max_minus_coherence_maps_24lamD",
                         )
                         location_max_minus_coh_pdf = f"{location_max_minus_coh_pdf}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf"
                         _save_roi_size_max_minus_coherence_pdf_for_planet_location(
@@ -552,7 +576,7 @@ def _run_planet_position_roi_size_sweep(
                             location_fft_pdf = os.path.join(
                                 location_dir,
                                 "planet_position_roi_size_sweep_frequency_selection_spectra_"
-                                f"{location_tag}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf",
+                                f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.pdf",
                             )
                             _save_roi_size_fft_spectra_pdf_for_planet_location(
                                 output_path=location_fft_pdf,
@@ -561,7 +585,7 @@ def _run_planet_position_roi_size_sweep(
                         location_csv = os.path.join(
                             location_dir,
                             "planet_position_roi_size_sweep_table_"
-                            f"{location_tag}_{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.csv",
+                            f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{roi_tag}{ghost_suffix}.csv",
                         )
                         with open(location_csv, "w", newline="", encoding="utf-8") as fh:
                             writer = csv.DictWriter(
@@ -638,10 +662,26 @@ def _run_planet_position_roi_size_sweep(
             ),
             location_panels=location_panels,
         )
+        grouped_lyot_phase_pngs = _save_grouped_roi_size_lyot_plane_field_phase_pngs(
+            output_dir=sweep_output_dir,
+            base_name=(
+                "planet_position_roi_size_sweep_lyot_plane_field_phase_grid_"
+                f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{lyot_reference_tag}{ghost_suffix}"
+            ),
+            location_panels=location_panels,
+        )
         grouped_focal_pngs = _save_grouped_roi_size_focal_plane_pngs(
             output_dir=sweep_output_dir,
             base_name=(
                 "planet_position_roi_size_sweep_focal_plane_phase_grid_"
+                f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{lyot_reference_tag}{ghost_suffix}"
+            ),
+            location_panels=location_panels,
+        )
+        grouped_focal_field_phase_pngs = _save_grouped_roi_size_focal_plane_field_phase_pngs(
+            output_dir=sweep_output_dir,
+            base_name=(
+                "planet_position_roi_size_sweep_focal_plane_field_phase_grid_"
                 f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{radius_tag}{theta_tag}{roi_tag}{lyot_reference_tag}{ghost_suffix}"
             ),
             location_panels=location_panels,
@@ -705,9 +745,13 @@ def _run_planet_position_roi_size_sweep(
         for path in grouped_coherence_pdfs:
             print(f"Saved grouped coherence map PDF: {path}")
         for path in grouped_lyot_pngs:
-            print(f"Saved grouped Lyot-plane phase-grid PNG: {path}")
+            print(f"Saved grouped Lyot-plane intensity grid PNG: {path}")
+        for path in grouped_lyot_phase_pngs:
+            print(f"Saved grouped Lyot-plane field-phase grid PNG: {path}")
         for path in grouped_focal_pngs:
             print(f"Saved grouped focal-plane phase-grid PNG: {path}")
+        for path in grouped_focal_field_phase_pngs:
+            print(f"Saved grouped focal-plane field-phase grid PNG: {path}")
         for path in grouped_focal_phase_shift_pngs:
             print(f"Saved grouped focal-plane phase-shift-map PNG: {path}")
     else:
@@ -920,6 +964,17 @@ def _run_planet_position_map_sweep(
         panel_labels=summary_labels,
         figure_title="Planet Position Sweep: Lyot Plane by Phase Modulation",
     )
+    out_lyot_phase_png = os.path.join(
+        sweep_output_dir,
+        "planet_position_map_sweep_lyot_plane_field_phase_grid_"
+        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png",
+    )
+    _save_lyot_plane_field_phase_grid_png(
+        output_path=out_lyot_phase_png,
+        panels=summary_panels,
+        panel_labels=summary_labels,
+        figure_title="Planet Position Sweep: Lyot Plane Field Phase by Phase Modulation",
+    )
     out_focal_png = os.path.join(
         sweep_output_dir,
         "planet_position_map_sweep_focal_plane_phase_grid_"
@@ -930,6 +985,17 @@ def _run_planet_position_map_sweep(
         panels=summary_panels,
         panel_labels=summary_labels,
         figure_title="Planet Position Sweep: Focal Plane by Phase Modulation",
+    )
+    out_focal_field_phase_png = os.path.join(
+        sweep_output_dir,
+        "planet_position_map_sweep_focal_plane_field_phase_grid_"
+        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png",
+    )
+    _save_focal_plane_field_phase_grid_png(
+        output_path=out_focal_field_phase_png,
+        panels=summary_panels,
+        panel_labels=summary_labels,
+        figure_title="Planet Position Sweep: Focal Plane Field Phase by Phase Modulation",
     )
     out_focal_phase_shift_png = os.path.join(
         sweep_output_dir,
@@ -954,9 +1020,13 @@ def _run_planet_position_map_sweep(
     )
     print(f"Saved planet-position sweep table: {out_csv}")
     print(f"Saved planet-position sweep summary PNG: {out_png}")
-    print(f"Saved planet-position sweep Lyot-plane phase grid: {out_lyot_png}")
+    print(f"Saved planet-position sweep Lyot-plane intensity grid: {out_lyot_png}")
+    if os.path.exists(out_lyot_phase_png):
+        print(f"Saved planet-position sweep Lyot-plane field-phase grid: {out_lyot_phase_png}")
     if os.path.exists(out_focal_png):
         print(f"Saved planet-position sweep focal-plane phase grid: {out_focal_png}")
+    if os.path.exists(out_focal_field_phase_png):
+        print(f"Saved planet-position sweep focal-plane field-phase grid: {out_focal_field_phase_png}")
     if os.path.exists(out_focal_phase_shift_png):
         print(f"Saved planet-position sweep focal-plane phase-shift-map grid: {out_focal_phase_shift_png}")
     print(f"Saved planet-position sweep location overview: {out_loc_png}")
@@ -1080,6 +1150,20 @@ def _run_planet_flux_ratio_map_sweep(
             f"fixed position=({planet_center[0]:+.2f}, {planet_center[1]:+.2f}) λ/D"
         ),
     )
+    out_lyot_phase_png = os.path.join(
+        sweep_output_dir,
+        "planet_flux_ratio_map_sweep_lyot_plane_field_phase_grid_"
+        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png",
+    )
+    _save_lyot_plane_field_phase_grid_png(
+        output_path=out_lyot_phase_png,
+        panels=summary_panels,
+        panel_labels=summary_labels,
+        figure_title=(
+            "Planet Brightness Sweep: Lyot Plane Field Phase by Phase Modulation\n"
+            f"fixed position=({planet_center[0]:+.2f}, {planet_center[1]:+.2f}) λ/D"
+        ),
+    )
     out_focal_png = os.path.join(
         sweep_output_dir,
         "planet_flux_ratio_map_sweep_focal_plane_phase_grid_"
@@ -1091,6 +1175,20 @@ def _run_planet_flux_ratio_map_sweep(
         panel_labels=summary_labels,
         figure_title=(
             "Planet Brightness Sweep: Focal Plane by Phase Modulation\n"
+            f"fixed position=({planet_center[0]:+.2f}, {planet_center[1]:+.2f}) λ/D"
+        ),
+    )
+    out_focal_field_phase_png = os.path.join(
+        sweep_output_dir,
+        "planet_flux_ratio_map_sweep_focal_plane_field_phase_grid_"
+        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png",
+    )
+    _save_focal_plane_field_phase_grid_png(
+        output_path=out_focal_field_phase_png,
+        panels=summary_panels,
+        panel_labels=summary_labels,
+        figure_title=(
+            "Planet Brightness Sweep: Focal Plane Field Phase by Phase Modulation\n"
             f"fixed position=({planet_center[0]:+.2f}, {planet_center[1]:+.2f}) λ/D"
         ),
     )
@@ -1110,9 +1208,13 @@ def _run_planet_flux_ratio_map_sweep(
     )
     print(f"Saved planet-flux-ratio sweep table: {out_csv}")
     print(f"Saved planet-flux-ratio sweep summary PNG: {out_png}")
-    print(f"Saved planet-flux-ratio sweep Lyot-plane phase grid: {out_lyot_png}")
+    print(f"Saved planet-flux-ratio sweep Lyot-plane intensity grid: {out_lyot_png}")
+    if os.path.exists(out_lyot_phase_png):
+        print(f"Saved planet-flux-ratio sweep Lyot-plane field-phase grid: {out_lyot_phase_png}")
     if os.path.exists(out_focal_png):
         print(f"Saved planet-flux-ratio sweep focal-plane phase grid: {out_focal_png}")
+    if os.path.exists(out_focal_field_phase_png):
+        print(f"Saved planet-flux-ratio sweep focal-plane field-phase grid: {out_focal_field_phase_png}")
     if os.path.exists(out_focal_phase_shift_png):
         print(f"Saved planet-flux-ratio sweep focal-plane phase-shift-map grid: {out_focal_phase_shift_png}")
 
@@ -1219,6 +1321,21 @@ def _run_mask_rotation_phase_step_sweep(
             f"flux={float(args.planet_flux_ratio_local):.3e}"
         ),
     )
+    out_lyot_phase_png = os.path.join(
+        sweep_output_dir,
+        "mask_rotation_phase_step_sweep_lyot_plane_field_phase_grid_"
+        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png",
+    )
+    _save_lyot_plane_field_phase_grid_png(
+        output_path=out_lyot_phase_png,
+        panels=summary_panels,
+        panel_labels=summary_labels,
+        figure_title=(
+            "Mask Rotation Step Sweep: Lyot Plane Field Phase by Phase Modulation\n"
+            f"fixed position=({planet_center[0]:+.2f}, {planet_center[1]:+.2f}) λ/D, "
+            f"flux={float(args.planet_flux_ratio_local):.3e}"
+        ),
+    )
     out_lyot_png = os.path.join(
         sweep_output_dir,
         "mask_rotation_phase_step_sweep_lyot_plane_phase_grid_"
@@ -1249,6 +1366,21 @@ def _run_mask_rotation_phase_step_sweep(
             f"flux={float(args.planet_flux_ratio_local):.3e}"
         ),
     )
+    out_focal_field_phase_png = os.path.join(
+        sweep_output_dir,
+        "mask_rotation_phase_step_sweep_focal_plane_field_phase_grid_"
+        f"{mask_output_tag}{phase_cycles_tag}{phase_sweep_mode_tag}{single_region_tag}{ghost_suffix}.png",
+    )
+    _save_focal_plane_field_phase_grid_png(
+        output_path=out_focal_field_phase_png,
+        panels=summary_panels,
+        panel_labels=summary_labels,
+        figure_title=(
+            "Mask Rotation Step Sweep: Focal Plane Field Phase by Phase Modulation\n"
+            f"fixed position=({planet_center[0]:+.2f}, {planet_center[1]:+.2f}) λ/D, "
+            f"flux={float(args.planet_flux_ratio_local):.3e}"
+        ),
+    )
     out_focal_phase_shift_png = os.path.join(
         sweep_output_dir,
         "mask_rotation_phase_step_sweep_focal_plane_phase_shift_grid_"
@@ -1266,9 +1398,13 @@ def _run_mask_rotation_phase_step_sweep(
     )
     print(f"Saved mask-rotation phase-step sweep table: {out_csv}")
     print(f"Saved mask-rotation phase-step sweep summary PNG: {out_png}")
-    print(f"Saved mask-rotation phase-step sweep Lyot-plane phase grid: {out_lyot_png}")
+    print(f"Saved mask-rotation phase-step sweep Lyot-plane intensity grid: {out_lyot_png}")
+    if os.path.exists(out_lyot_phase_png):
+        print(f"Saved mask-rotation phase-step sweep Lyot-plane field-phase grid: {out_lyot_phase_png}")
     if os.path.exists(out_focal_png):
         print(f"Saved mask-rotation phase-step sweep focal-plane phase grid: {out_focal_png}")
+    if os.path.exists(out_focal_field_phase_png):
+        print(f"Saved mask-rotation phase-step sweep focal-plane field-phase grid: {out_focal_field_phase_png}")
     if os.path.exists(out_focal_phase_shift_png):
         print(f"Saved mask-rotation phase-step sweep focal-plane phase-shift-map grid: {out_focal_phase_shift_png}")
 
@@ -2522,6 +2658,12 @@ def run_cdi_planet_phase(
     mask_rotation_mode = phase_sweep_mode == "mask_rotation"
     modulation_sweep_dir = os.path.join(
         RESULTS_ROOT_DIR,
+        _source_state_folder_name(
+            bool(sim_kwargs.get("include_star", True)),
+            bool(sim_kwargs.get("include_companion", True)),
+            int(sim_kwargs.get("coherent_ring_speckle_count", 0)),
+            float(sim_kwargs.get("coherent_ring_speckle_intensity", 1.0)),
+        ),
         _modulation_sweep_folder_name(phase_sweep_mode),
     )
     if int(args.fov_count) < 1:
@@ -2772,7 +2914,6 @@ def run_cdi_planet_phase(
             f"{lyot_reference_folder_tag}"
         ),
     )
-    os.makedirs(cdi_planet_ratio_dir, exist_ok=True)
     cdi_planet_ratio_dir_no_pov = os.path.join(
         contrast_ratio_dir,
         (
@@ -2823,7 +2964,7 @@ def run_cdi_planet_phase(
         sweep_folder = os.path.join(
             cdi_planet_ratio_dir_no_pov,
             "roi_size_sweep",
-            _roi_shape_folder_name(region_shape_name),
+            *_roi_shape_folder_parts_for_mode(region_shape_name, phase_sweep_mode),
         )
         _run_roi_size_sweep_snr_vs_theta(
             args=effective_args,
@@ -2900,7 +3041,7 @@ def run_cdi_planet_phase(
         sweep_folder = os.path.join(
             polar_root,
             "planet_position_roi_size_sweep",
-            _roi_shape_folder_name(region_shape_name),
+            *_roi_shape_folder_parts_for_mode(region_shape_name, phase_sweep_mode),
         )
         _run_planet_position_roi_size_sweep(
             args=effective_args,
@@ -3031,6 +3172,7 @@ def run_cdi_planet_phase(
         print("Ring rotation sweep enabled: skipped standard outputs.")
         return
 
+    os.makedirs(cdi_planet_ratio_dir, exist_ok=True)
     base = CoronagraphSimulator(**sim_local).run()
     n_fft = int(base["n_fft"])
     samp = float(base["focal_sampling"])

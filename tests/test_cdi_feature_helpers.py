@@ -15,14 +15,20 @@ from coronagraph.cdi_feature import (
     _polar_to_cartesian_lamD,
     _run_planet_position_roi_size_sweep,
     _roi_shape_folder_name,
+    _roi_shape_folder_parts_for_mode,
+    _source_state_folder_name,
     _summarize_roi_snr_trend,
 )
 from coronagraph.cdi_reports import (
+    _has_roi_indication_mode as _reports_has_roi_indication_mode,
     _build_planet_position_map_report_groups,
+    _save_focal_plane_field_phase_grid_png,
     _save_focal_plane_phase_grid_png,
     _save_focal_plane_phase_shift_grid_png,
+    _save_lyot_plane_field_phase_grid_png,
     _save_lyot_plane_phase_grid_png,
 )
+from coronagraph.plotting import _has_roi_indication_mode
 from coronagraph.simulator import CoronagraphSimulator
 from coronagraph.region_shapes import build_touching_circle_ring
 
@@ -59,6 +65,51 @@ class CocFeatureHelperTests(unittest.TestCase):
     def test_roi_shape_folder_name_normalizes_aliases(self) -> None:
         self.assertEqual(_roi_shape_folder_name("ring"), "shape_ring")
         self.assertEqual(_roi_shape_folder_name("ring-of-circles"), "shape_ring_of_circle")
+
+    def test_roi_shape_folder_parts_for_mode_omits_non_roi_modes(self) -> None:
+        self.assertEqual(_roi_shape_folder_parts_for_mode("ring", "focal_plane"), [])
+        self.assertEqual(_roi_shape_folder_parts_for_mode("ring", "global"), [])
+        self.assertEqual(_roi_shape_folder_parts_for_mode("ring", "mask_rotation"), [])
+        self.assertEqual(_roi_shape_folder_parts_for_mode("ring", "regional"), ["shape_ring"])
+
+    def test_source_state_folder_name_tracks_star_and_planet(self) -> None:
+        self.assertEqual(
+            _source_state_folder_name(include_star=True, include_companion=True),
+            "star_enabled_planet_enabled_speckles_disabled",
+        )
+        self.assertEqual(
+            _source_state_folder_name(include_star=True, include_companion=False),
+            "star_enabled_planet_disabled_speckles_disabled",
+        )
+        self.assertEqual(
+            _source_state_folder_name(include_star=False, include_companion=False),
+            "star_disabled_planet_disabled_speckles_disabled",
+        )
+        self.assertEqual(
+            _source_state_folder_name(
+                include_star=False,
+                include_companion=False,
+                coherent_ring_speckle_count=2,
+                coherent_ring_speckle_intensity=1e-3,
+            ),
+            "star_disabled_planet_disabled_speckles_enabled",
+        )
+        self.assertEqual(
+            _source_state_folder_name(
+                include_star=False,
+                include_companion=False,
+                coherent_ring_speckle_count=2,
+                coherent_ring_speckle_intensity=0.0,
+            ),
+            "star_disabled_planet_disabled_speckles_disabled",
+        )
+
+    def test_has_roi_indication_mode_only_for_roi_modes(self) -> None:
+        for helper in (_has_roi_indication_mode, _reports_has_roi_indication_mode):
+            self.assertTrue(helper("regional"))
+            self.assertFalse(helper("global"))
+            self.assertFalse(helper("focal_plane"))
+            self.assertFalse(helper("mask_rotation"))
 
     def test_polar_to_cartesian_lamd(self) -> None:
         x, y = _polar_to_cartesian_lamD(2.0, 90.0)
@@ -183,11 +234,15 @@ class CocFeatureHelperTests(unittest.TestCase):
         self.assertIsNotNone(best)
         self.assertEqual(len(panels), 1)
         lyot_stack = np.asarray(panels[0]["lyot_intensity_stack"], dtype=float)
+        lyot_phase_stack = np.asarray(panels[0]["lyot_phase_stack"], dtype=float)
         np.testing.assert_allclose(np.asarray(panels[0]["lyot_phase_offsets_rad"], dtype=float), phase_offsets)
         self.assertEqual(lyot_stack.shape[0], phase_offsets.size)
+        self.assertEqual(lyot_phase_stack.shape, lyot_stack.shape)
         self.assertGreater(lyot_stack.shape[1], 0)
         self.assertGreater(lyot_stack.shape[2], 0)
         self.assertTrue(np.all(lyot_stack >= 0.0))
+        self.assertTrue(np.all(lyot_phase_stack >= -np.pi))
+        self.assertTrue(np.all(lyot_phase_stack <= np.pi))
 
     def test_evaluate_best_roi_focal_plane_mode_uses_no_local_roi_regions(self) -> None:
         sim_local = {
@@ -230,6 +285,7 @@ class CocFeatureHelperTests(unittest.TestCase):
         self.assertEqual(panels[0]["phase_sweep_mode"], "focal_plane")
         self.assertEqual(panels[0]["roi_centers_lamD"], [])
         focal_stack = np.asarray(panels[0]["focal_plane_intensity_stack"], dtype=float)
+        focal_phase_stack = np.asarray(panels[0]["focal_plane_field_phase_stack"], dtype=float)
         np.testing.assert_allclose(
             np.asarray(panels[0]["focal_plane_phase_offsets_rad"], dtype=float),
             np.array([0.0, np.pi], dtype=float),
@@ -238,6 +294,9 @@ class CocFeatureHelperTests(unittest.TestCase):
         self.assertGreater(focal_stack.shape[1], 0)
         self.assertGreater(focal_stack.shape[2], 0)
         self.assertTrue(np.all(focal_stack >= 0.0))
+        self.assertEqual(focal_phase_stack.shape, focal_stack.shape)
+        self.assertTrue(np.all(focal_phase_stack >= -np.pi - 1e-6))
+        self.assertTrue(np.all(focal_phase_stack <= np.pi + 1e-6))
         phase_shift_stack = np.asarray(panels[0]["focal_plane_phase_shift_stack"], dtype=float)
         self.assertEqual(phase_shift_stack.shape, focal_stack.shape)
         np.testing.assert_allclose(phase_shift_stack[0], 0.0)
@@ -380,6 +439,29 @@ class CocFeatureHelperTests(unittest.TestCase):
             self.assertTrue(os.path.exists(output_path))
             self.assertGreater(os.path.getsize(output_path), 0)
 
+    def test_save_lyot_plane_field_phase_grid_png_writes_file(self) -> None:
+        panel = {
+            "phase_sweep_mode": "regional",
+            "lyot_phase_offsets_rad": np.array([0.0, np.pi], dtype=float),
+            "lyot_phase_stack": np.array(
+                [
+                    [[0.0, np.pi / 2.0], [np.pi, -np.pi / 2.0]],
+                    [[np.pi / 4.0, -np.pi / 4.0], [np.pi / 3.0, -np.pi / 3.0]],
+                ],
+                dtype=float,
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "lyot_phase_grid.png")
+            _save_lyot_plane_field_phase_grid_png(
+                output_path=output_path,
+                panels=[panel],
+                panel_labels=["flux=1e-3"],
+                figure_title="Lyot Plane Field Phase Grid",
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
     def test_save_focal_plane_phase_grid_png_writes_file(self) -> None:
         panel = {
             "phase_sweep_mode": "focal_plane",
@@ -399,6 +481,29 @@ class CocFeatureHelperTests(unittest.TestCase):
                 panels=[panel],
                 panel_labels=["flux=1e-3"],
                 figure_title="Focal Plane Grid",
+            )
+            self.assertTrue(os.path.exists(output_path))
+            self.assertGreater(os.path.getsize(output_path), 0)
+
+    def test_save_focal_plane_field_phase_grid_png_writes_file(self) -> None:
+        panel = {
+            "phase_sweep_mode": "focal_plane",
+            "focal_plane_phase_offsets_rad": np.array([0.0, np.pi], dtype=float),
+            "focal_plane_field_phase_stack": np.array(
+                [
+                    [[0.0, np.pi / 2.0], [np.pi, -np.pi / 2.0]],
+                    [[np.pi / 4.0, -np.pi / 4.0], [np.pi / 3.0, -np.pi / 3.0]],
+                ],
+                dtype=float,
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "focal_field_phase_grid.png")
+            _save_focal_plane_field_phase_grid_png(
+                output_path=output_path,
+                panels=[panel],
+                panel_labels=["flux=1e-3"],
+                figure_title="Focal Plane Field Phase Grid",
             )
             self.assertTrue(os.path.exists(output_path))
             self.assertGreater(os.path.getsize(output_path), 0)

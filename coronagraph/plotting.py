@@ -13,6 +13,11 @@ def _is_whole_focal_plane_phase_mode(phase_sweep_mode: str) -> bool:
     return str(phase_sweep_mode).strip().lower() in {"global", "focal_plane"}
 
 
+def _has_roi_indication_mode(phase_sweep_mode: str) -> bool:
+    mode = str(phase_sweep_mode).strip().lower()
+    return mode != "mask_rotation" and not _is_whole_focal_plane_phase_mode(mode)
+
+
 def _theta_back_and_forth(n: int, max_abs: float = np.pi) -> np.ndarray:
     if n <= 1:
         return np.array([0.0], dtype=float)
@@ -830,6 +835,7 @@ def _plot_cdi_planet_phase_outputs_impl(
     from matplotlib.patches import Circle
     phase_sweep_mode = str(getattr(args, "phase_sweep_mode", "regional")).strip().lower()
     mask_rotation_mode = phase_sweep_mode == "mask_rotation"
+    has_roi_indication_mode = _has_roi_indication_mode(phase_sweep_mode)
     region_shape_name = normalize_region_shape(getattr(args, "region_shape", "circle"))
     cdi_phase_cycles = (
         float(args.cdi_phase_cycles)
@@ -932,7 +938,7 @@ def _plot_cdi_planet_phase_outputs_impl(
         else float("nan")
     )
     # Visualize annulus on the incoherence map.
-    if not mask_rotation_mode:
+    if has_roi_indication_mode:
         axes_maps[1].add_patch(
             Circle((0.0, 0.0), planet_r_lamD - ring_half_width, fill=False, edgecolor="white", linewidth=1.1, linestyle="--")
         )
@@ -1120,7 +1126,7 @@ def _plot_cdi_planet_phase_outputs_impl(
                         ha="center",
                         va="center",
                     )
-                if not mask_rotation_mode:
+                if has_roi_indication_mode:
                     ax_fov.add_patch(
                         Circle((0.0, 0.0), planet_r_lamD - ring_half_width, fill=False, edgecolor="white", linewidth=1.1, linestyle="--")
                     )
@@ -1225,7 +1231,7 @@ def _plot_cdi_planet_phase_outputs_impl(
     )
     fig_overlay, ax_overlay = plt.subplots(1, 1, figsize=(6.7, 6.0), constrained_layout=True)
     im = ax_overlay.imshow(np.log10(base["final_psf_with_ghost"][sl, sl] + 1e-12), origin="lower", cmap="inferno", vmin=-8, vmax=0, extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD])
-    if not mask_rotation_mode:
+    if has_roi_indication_mode:
         for j, (cx, cy) in enumerate(centers):
             col = "lime" if j == planet_region_idx else "cyan"
             _draw_local_region_outline(
@@ -1249,7 +1255,7 @@ def _plot_cdi_planet_phase_outputs_impl(
     )
     ax_overlay.set_xlabel("x [λ/D]")
     ax_overlay.set_ylabel("y [λ/D]")
-    if single_fov_mode and not mask_rotation_mode:
+    if single_fov_mode and has_roi_indication_mode:
         planet_center = centers[planet_region_idx]
         orbit_r = float(np.hypot(planet_center[0], planet_center[1]))
         n_positions = max(1, int(args.fov_centers_count))
@@ -1436,7 +1442,7 @@ def _plot_cdi_planet_phase_outputs_impl(
     ax1_c.grid(alpha=0.3)
     ax1_c.legend(fontsize=8, ncol=1)
     im_combined = ax2_c.imshow(np.log10(base["final_psf_with_ghost"][sl, sl] + 1e-12), origin="lower", cmap="inferno", vmin=-8, vmax=0, extent=[-crop_lamD, crop_lamD, -crop_lamD, crop_lamD])
-    if not mask_rotation_mode:
+    if has_roi_indication_mode:
         for j, (cx, cy) in enumerate(centers):
             col = "lime" if j == planet_region_idx else "cyan"
             _draw_local_region_outline(
@@ -1460,7 +1466,7 @@ def _plot_cdi_planet_phase_outputs_impl(
     )
     ax2_c.set_xlabel("x [λ/D]")
     ax2_c.set_ylabel("y [λ/D]")
-    if single_fov_mode and not mask_rotation_mode:
+    if single_fov_mode and has_roi_indication_mode:
         planet_center = centers[planet_region_idx]
         orbit_r = float(np.hypot(planet_center[0], planet_center[1]))
         n_positions = max(1, int(args.fov_centers_count))

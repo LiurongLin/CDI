@@ -59,8 +59,11 @@ def default_sim_kwargs() -> dict:
         ghost_coherence=1.0,
         include_ghost=True,
         include_interference=True,
+        include_star=True,
+        include_companion=True,
         include_companion_ghost=True,
         coherent_ring_speckle_count=0,
+        coherent_ring_speckle_intensity=1.0,
         companion_flux_ratio=0.0,
         companion_offset_lamD=(0.0, 0.0),
         e_final_phase_offset=np.pi,
@@ -136,10 +139,13 @@ def print_run_header(result: dict) -> None:
     print(f"Ghost coherence gamma: {result['ghost_coherence']:.3f}")
     print(f"Ghost enabled: {result.get('include_ghost', True)}")
     print(f"Interference enabled: {result.get('include_interference', True)}")
+    print(f"Star enabled: {result.get('include_star', True)}")
+    print(f"Companion enabled: {result.get('include_companion', True)}")
     print(f"Companion ghost enabled: {result.get('include_companion_ghost', True)}")
     print(f"Companion flux ratio: {result['companion_flux_ratio']:.3e}")
     print(f"Companion offset: {result['companion_offset_lamD']} λ/D")
     print(f"Coherent ring speckle count: {result.get('coherent_ring_speckle_count', 0)}")
+    print(f"Coherent ring speckle intensity: {result.get('coherent_ring_speckle_intensity', 1.0):.3e}")
     if result.get("coherent_ring_speckle_offsets_lamD"):
         print(f"Coherent ring speckle offsets: {result['coherent_ring_speckle_offsets_lamD']} λ/D")
     print("e_final_phase_offset: {:.3f} rad".format(result["e_final_phase_offset"]))
@@ -287,6 +293,19 @@ def parse_args() -> argparse.Namespace:
         help="Disable coherent interference term (keeps ghost intensity-only if ghost is enabled).",
     )
     parser.add_argument(
+        "--disable-star",
+        action="store_true",
+        help="Disable the stellar branch while keeping the companion/planet branch.",
+    )
+    parser.add_argument(
+        "--disable-companion",
+        action="store_true",
+        help=(
+            "Disable the companion/planet branch while keeping its flux ratio as the "
+            "coherent ring speckle calibration target."
+        ),
+    )
+    parser.add_argument(
         "--disable-companion-ghost",
         action="store_true",
         help="Disable ghost and companion self-interference for the companion branch only.",
@@ -348,7 +367,16 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "Number of extra coherent speckles to place on the same angular-separation ring "
-            "as the planet, equally spaced in azimuth and using the same flux ratio."
+            "as the planet, equally spaced in azimuth."
+        ),
+    )
+    parser.add_argument(
+        "--coherent-ring-speckle-intensity",
+        type=float,
+        default=1.0,
+        help=(
+            "Input intensity of each coherent ring speckle relative to the star source. "
+            "Use 1.0 for one star intensity."
         ),
     )
     parser.add_argument(
@@ -691,11 +719,14 @@ def _build_sim_kwargs(args: argparse.Namespace) -> dict:
     sim_kwargs["phase_screen_path"] = resolve_phase_screen_path(args.phase_screen_jitter)
     sim_kwargs["phase_screen_index"] = 0
     sim_kwargs["coherent_ring_speckle_count"] = int(args.coherent_ring_speckle_count)
+    sim_kwargs["coherent_ring_speckle_intensity"] = float(args.coherent_ring_speckle_intensity)
     sim_kwargs["lyot_reference_scale"] = float(args.lyot_reference_percent) / 100.0
     sim_kwargs["companion_flux_ratio"] = float(args.planet_flux_ratio)
     sim_kwargs["companion_offset_lamD"] = (float(args.planet_offset_x), float(args.planet_offset_y))
     sim_kwargs["include_ghost"] = not bool(args.disable_ghost)
     sim_kwargs["include_interference"] = (not bool(args.disable_interference)) and sim_kwargs["include_ghost"]
+    sim_kwargs["include_star"] = not bool(args.disable_star)
+    sim_kwargs["include_companion"] = not bool(args.disable_companion)
     sim_kwargs["include_companion_ghost"] = not bool(args.disable_companion_ghost)
     sim_kwargs["perfect_coronagraph"] = str(args.phase_mask_type).lower() in {
         "perfect_corongraph",

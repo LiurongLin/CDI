@@ -495,8 +495,10 @@ def _evaluate_best_roi_for_planet_center(
                 planet_center_lamD=planet_center,
             )
         stack = np.zeros((phase_offsets.size, 2 * half16, 2 * half16), dtype=float)
+        focal_plane_field_phase_stack: np.ndarray | None = None
         focal_plane_phase_shift_stack: np.ndarray | None = None
         lyot_intensity_stack: np.ndarray | None = None
+        lyot_phase_stack: np.ndarray | None = None
         lyot_crop_slices: tuple[slice, slice] | None = None
         for i, ph in enumerate(phase_offsets):
             if sweep_mode == "mask_rotation":
@@ -542,6 +544,13 @@ def _evaluate_best_roi_for_planet_center(
             phase_result = phase_sim.run()
             stack[i] = phase_result["final_psf_with_ghost"][sl16, sl16]
             if collect_panels:
+                if focal_plane_field_phase_stack is None:
+                    focal_plane_field_phase_stack = np.zeros_like(stack, dtype=np.float32)
+                focal_plane_field = np.asarray(
+                    phase_result["focal_plane_field_after_mask"],
+                    dtype=np.complex128,
+                )
+                focal_plane_field_phase_stack[i] = np.angle(focal_plane_field[sl16, sl16])
                 if focal_plane_phase_shift_stack is None and _is_whole_focal_plane_phase_mode(sweep_mode):
                     focal_plane_phase_shift_stack = np.zeros_like(stack, dtype=np.float32)
                 if focal_plane_phase_shift_stack is not None:
@@ -562,12 +571,18 @@ def _evaluate_best_roi_for_planet_center(
                         (phase_offsets.size, y1 - y0, x1 - x0),
                         dtype=np.float32,
                     )
+                    lyot_phase_stack = np.zeros(
+                        (phase_offsets.size, y1 - y0, x1 - x0),
+                        dtype=np.float32,
+                    )
                 lyot_field = np.asarray(
                     phase_result["lyot_field_before_reference_subtraction"],
                     dtype=np.complex128,
                 )
                 y_sl, x_sl = lyot_crop_slices
-                lyot_intensity_stack[i] = np.abs(lyot_field[y_sl, x_sl]) ** 2
+                lyot_crop = lyot_field[y_sl, x_sl]
+                lyot_intensity_stack[i] = np.abs(lyot_crop) ** 2
+                lyot_phase_stack[i] = np.angle(lyot_crop)
         map_info = _compute_incoherence_map_info(
             stack=stack,
             phase_offsets=phase_offsets,
@@ -697,10 +712,20 @@ def _evaluate_best_roi_for_planet_center(
                         if lyot_intensity_stack is not None
                         else np.zeros((0, 0, 0), dtype=np.float32)
                     ),
+                    "lyot_phase_stack": (
+                        np.array(lyot_phase_stack, dtype=np.float32)
+                        if lyot_phase_stack is not None
+                        else np.zeros((0, 0, 0), dtype=np.float32)
+                    ),
                     "lyot_phase_offsets_rad": np.asarray(phase_offsets, dtype=float),
                     "focal_plane_intensity_stack": (
                         np.array(stack, dtype=np.float32)
                         if _is_whole_focal_plane_phase_mode(sweep_mode)
+                        else np.zeros((0, 0, 0), dtype=np.float32)
+                    ),
+                    "focal_plane_field_phase_stack": (
+                        np.array(focal_plane_field_phase_stack, dtype=np.float32)
+                        if focal_plane_field_phase_stack is not None
                         else np.zeros((0, 0, 0), dtype=np.float32)
                     ),
                     "focal_plane_phase_offsets_rad": np.asarray(phase_offsets, dtype=float),

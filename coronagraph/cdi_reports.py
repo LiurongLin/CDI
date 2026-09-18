@@ -10,6 +10,14 @@ from .region_shapes import annulus_radii_from_width, build_touching_circle_ring
 from .simulator import CoronagraphSimulator
 
 
+def _has_roi_indication_mode(phase_sweep_mode: str) -> bool:
+    return str(phase_sweep_mode).strip().lower() not in {
+        "global",
+        "focal_plane",
+        "mask_rotation",
+    }
+
+
 def _write_rgb_gif(rgb8_frames: np.ndarray, gif_path: str, duration_ms: int = 500) -> None:
     saved_gif = False
     try:
@@ -307,6 +315,9 @@ def _save_grouped_roi_size_map_pdfs(
                         orbit_radius_lamD = float(panel["orbit_radius_lamD"])
                         roi_centers = panel["roi_centers_lamD"]
                         roi_size = float(panel["resolved_roi_size_lamD"])
+                        has_roi_indication_mode = _has_roi_indication_mode(
+                            str(panel.get("phase_sweep_mode", "regional"))
+                        )
                         ax.annotate(
                             "Planet",
                             xy=(float(planet_center[0]), float(planet_center[1])),
@@ -320,17 +331,18 @@ def _save_grouped_roi_size_map_pdfs(
                             va="bottom",
                             arrowprops=dict(arrowstyle="->", color="white", lw=1.0),
                         )
-                        if region_shape_name == "ring":
-                            ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
-                                mid_radius_lamD=orbit_radius_lamD,
-                                width_lamD=roi_size,
-                            )
-                            ax.add_patch(plt.Circle((0.0, 0.0), float(ring_rmin_lamD), fill=False, edgecolor="lime", linewidth=overlay_linewidth))
-                            ax.add_patch(plt.Circle((0.0, 0.0), float(ring_rmax_lamD), fill=False, edgecolor="cyan", linewidth=overlay_linewidth))
-                        else:
-                            for j, (cx, cy) in enumerate(roi_centers):
-                                edge = "lime" if j == 0 else "cyan"
-                                ax.add_patch(plt.Circle((float(cx), float(cy)), roi_size, fill=False, edgecolor=edge, linewidth=overlay_linewidth))
+                        if has_roi_indication_mode:
+                            if region_shape_name == "ring":
+                                ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
+                                    mid_radius_lamD=orbit_radius_lamD,
+                                    width_lamD=roi_size,
+                                )
+                                ax.add_patch(plt.Circle((0.0, 0.0), float(ring_rmin_lamD), fill=False, edgecolor="lime", linewidth=overlay_linewidth))
+                                ax.add_patch(plt.Circle((0.0, 0.0), float(ring_rmax_lamD), fill=False, edgecolor="cyan", linewidth=overlay_linewidth))
+                            else:
+                                for j, (cx, cy) in enumerate(roi_centers):
+                                    edge = "lime" if j == 0 else "cyan"
+                                    ax.add_patch(plt.Circle((float(cx), float(cy)), roi_size, fill=False, edgecolor=edge, linewidth=overlay_linewidth))
                         location_line = (
                             f"r={float(panel.get('planet_radius_lamD', panel['orbit_radius_lamD'])):.2f} λ/D, "
                             f"θ={float(panel.get('planet_theta_deg', 0.0)):.1f}°"
@@ -434,6 +446,38 @@ def _save_grouped_roi_size_lyot_plane_pngs(
     return saved_paths
 
 
+def _save_grouped_roi_size_lyot_plane_field_phase_pngs(
+    *,
+    output_dir: str,
+    base_name: str,
+    location_panels: list[dict[str, object]],
+) -> list[str]:
+    groups = _build_planet_position_map_report_groups(location_panels)
+    saved_paths: list[str] = []
+    if len(groups) == 0:
+        return saved_paths
+
+    for group in groups:
+        grouped_panels: list[dict[str, object]] = []
+        grouped_labels: list[str] = []
+        for collection in list(group["panel_collections"]):
+            panels_sorted = sorted(collection, key=lambda p: float(p["requested_roi_size_lamD"]))
+            for panel in panels_sorted:
+                grouped_panels.append(panel)
+                grouped_labels.append(f"ROI={float(panel['requested_roi_size_lamD']):.2f}")
+        if len(grouped_panels) == 0:
+            continue
+        output_path = os.path.join(output_dir, f"{base_name}_{group['file_tag']}.png")
+        _save_lyot_plane_field_phase_grid_png(
+            output_path=output_path,
+            panels=grouped_panels,
+            panel_labels=grouped_labels,
+            figure_title="Lyot Plane Field Phase by Phase Modulation",
+        )
+        saved_paths.append(output_path)
+    return saved_paths
+
+
 def _save_grouped_roi_size_focal_plane_pngs(
     *,
     output_dir: str,
@@ -461,6 +505,39 @@ def _save_grouped_roi_size_focal_plane_pngs(
             panels=grouped_panels,
             panel_labels=grouped_labels,
             figure_title="Focal Plane by Phase Modulation",
+        )
+        if os.path.exists(output_path):
+            saved_paths.append(output_path)
+    return saved_paths
+
+
+def _save_grouped_roi_size_focal_plane_field_phase_pngs(
+    *,
+    output_dir: str,
+    base_name: str,
+    location_panels: list[dict[str, object]],
+) -> list[str]:
+    groups = _build_planet_position_map_report_groups(location_panels)
+    saved_paths: list[str] = []
+    if len(groups) == 0:
+        return saved_paths
+
+    for group in groups:
+        grouped_panels: list[dict[str, object]] = []
+        grouped_labels: list[str] = []
+        for collection in list(group["panel_collections"]):
+            panels_sorted = sorted(collection, key=lambda p: float(p["requested_roi_size_lamD"]))
+            for panel in panels_sorted:
+                grouped_panels.append(panel)
+                grouped_labels.append(f"ROI={float(panel['requested_roi_size_lamD']):.2f}")
+        if len(grouped_panels) == 0:
+            continue
+        output_path = os.path.join(output_dir, f"{base_name}_{group['file_tag']}.png")
+        _save_focal_plane_field_phase_grid_png(
+            output_path=output_path,
+            panels=grouped_panels,
+            panel_labels=grouped_labels,
+            figure_title="Focal Plane Field Phase by Phase Modulation",
         )
         if os.path.exists(output_path):
             saved_paths.append(output_path)
@@ -598,8 +675,8 @@ def _save_roi_size_map_pdf_for_planet_location(
         else:
             gs = fig.add_gridspec(nrows_maps, ncols)
         first_panel = panels_sorted[0]
-        mask_rotation_mode = (
-            str(first_panel.get("phase_sweep_mode", "regional")).strip().lower() == "mask_rotation"
+        has_roi_indication_mode = _has_roi_indication_mode(
+            str(first_panel.get("phase_sweep_mode", "regional"))
         )
         first_ax = None
         poster_colorbar_image = None
@@ -708,7 +785,7 @@ def _save_roi_size_map_pdf_for_planet_location(
                     shrinkB=10 if poster_figure else 6,
                 ),
             )
-            if not mask_rotation_mode:
+            if has_roi_indication_mode:
                 if region_shape_name == "ring":
                     ring_rmin_lamD, ring_rmax_lamD = annulus_radii_from_width(
                         mid_radius_lamD=orbit_radius_lamD,
@@ -1368,6 +1445,86 @@ def _save_lyot_plane_phase_grid_png(
     plt.close(fig)
 
 
+def _save_lyot_plane_field_phase_grid_png(
+    *,
+    output_path: str,
+    panels: list[dict[str, object]],
+    panel_labels: list[str],
+    figure_title: str,
+) -> None:
+    if len(panels) == 0 or len(panels) != len(panel_labels):
+        return
+
+    lyot_stacks: list[np.ndarray] = []
+    phase_vectors: list[np.ndarray] = []
+    max_cols = 0
+    for panel in panels:
+        stack = np.asarray(panel.get("lyot_phase_stack", np.zeros((0, 0, 0))), dtype=float)
+        phase_vec = np.asarray(panel.get("lyot_phase_offsets_rad", np.array([], dtype=float)), dtype=float)
+        if stack.ndim != 3 or stack.shape[0] == 0 or phase_vec.size != stack.shape[0]:
+            return
+        lyot_stacks.append(stack)
+        phase_vectors.append(phase_vec)
+        max_cols = max(max_cols, int(stack.shape[0]))
+
+    if max_cols == 0:
+        return
+
+    nrows = len(panels)
+    fig, axes = plt.subplots(
+        nrows,
+        max_cols,
+        figsize=(2.2 * max_cols, 2.35 * nrows),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    axes_arr = np.asarray(axes, dtype=object)
+    shared_artist = None
+
+    for row_idx, (panel, label, stack, phase_vec) in enumerate(
+        zip(panels, panel_labels, lyot_stacks, phase_vectors)
+    ):
+        sweep_mode = str(panel.get("phase_sweep_mode", "regional")).strip().lower()
+        for col_idx in range(max_cols):
+            ax = axes_arr[row_idx, col_idx]
+            if col_idx >= stack.shape[0]:
+                ax.axis("off")
+                continue
+            image = np.asarray(stack[col_idx], dtype=float)
+            shared_artist = ax.imshow(
+                image,
+                origin="lower",
+                cmap="twilight",
+                vmin=-np.pi,
+                vmax=np.pi,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            phase_value = float(phase_vec[col_idx])
+            if sweep_mode == "mask_rotation":
+                title = f"rot={phase_value / np.pi:.2f}pi"
+            else:
+                title = f"phi={phase_value / np.pi:.2f}pi"
+            ax.set_title(title, fontsize=8, pad=4)
+            if col_idx == 0:
+                ax.set_ylabel(label, fontsize=9)
+
+    if shared_artist is not None:
+        cbar = fig.colorbar(
+            shared_artist,
+            ax=axes_arr.ravel().tolist(),
+            fraction=0.03,
+            pad=0.02,
+            shrink=0.96,
+        )
+        cbar.set_label("Lyot phase [rad]", fontsize=11)
+        cbar.ax.tick_params(labelsize=9)
+
+    fig.suptitle(figure_title, fontsize=14, fontweight="bold")
+    fig.savefig(output_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _save_focal_plane_phase_grid_png(
     *,
     output_path: str,
@@ -1460,6 +1617,86 @@ def _save_focal_plane_phase_grid_png(
             shrink=0.96,
         )
         cbar.set_label("Focal-plane intensity", fontsize=11)
+        cbar.ax.tick_params(labelsize=9)
+
+    fig.suptitle(figure_title, fontsize=14, fontweight="bold")
+    fig.savefig(output_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_focal_plane_field_phase_grid_png(
+    *,
+    output_path: str,
+    panels: list[dict[str, object]],
+    panel_labels: list[str],
+    figure_title: str,
+) -> None:
+    if len(panels) == 0 or len(panels) != len(panel_labels):
+        return
+
+    focal_phase_stacks: list[np.ndarray] = []
+    phase_vectors: list[np.ndarray] = []
+    max_cols = 0
+    for panel in panels:
+        stack = np.asarray(panel.get("focal_plane_field_phase_stack", np.zeros((0, 0, 0))), dtype=float)
+        phase_vec = np.asarray(panel.get("focal_plane_phase_offsets_rad", np.array([], dtype=float)), dtype=float)
+        if stack.ndim != 3 or stack.shape[0] == 0 or phase_vec.size != stack.shape[0]:
+            return
+        focal_phase_stacks.append(stack)
+        phase_vectors.append(phase_vec)
+        max_cols = max(max_cols, int(stack.shape[0]))
+
+    if max_cols == 0:
+        return
+
+    nrows = len(panels)
+    fig, axes = plt.subplots(
+        nrows,
+        max_cols,
+        figsize=(2.2 * max_cols, 2.35 * nrows),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    axes_arr = np.asarray(axes, dtype=object)
+    shared_artist = None
+
+    for row_idx, (panel, label, stack, phase_vec) in enumerate(
+        zip(panels, panel_labels, focal_phase_stacks, phase_vectors)
+    ):
+        sweep_mode = str(panel.get("phase_sweep_mode", "regional")).strip().lower()
+        for col_idx in range(max_cols):
+            ax = axes_arr[row_idx, col_idx]
+            if col_idx >= stack.shape[0]:
+                ax.axis("off")
+                continue
+            image = np.asarray(stack[col_idx], dtype=float)
+            shared_artist = ax.imshow(
+                image,
+                origin="lower",
+                cmap="twilight",
+                vmin=-np.pi,
+                vmax=np.pi,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            phase_value = float(phase_vec[col_idx])
+            if sweep_mode == "mask_rotation":
+                title = f"rot={phase_value / np.pi:.2f}pi"
+            else:
+                title = f"phi={phase_value / np.pi:.2f}pi"
+            ax.set_title(title, fontsize=8, pad=4)
+            if col_idx == 0:
+                ax.set_ylabel(label, fontsize=9)
+
+    if shared_artist is not None:
+        cbar = fig.colorbar(
+            shared_artist,
+            ax=axes_arr.ravel().tolist(),
+            fraction=0.03,
+            pad=0.02,
+            shrink=0.96,
+        )
+        cbar.set_label("Focal-plane field phase [rad]", fontsize=11)
         cbar.ax.tick_params(labelsize=9)
 
     fig.suptitle(figure_title, fontsize=14, fontweight="bold")
