@@ -197,6 +197,16 @@ def parse_args() -> argparse.Namespace:
         help="Launch desktop GUI runner instead of command-line execution.",
     )
     parser.add_argument(
+        "--interactive-slm-gui",
+        action="store_true",
+        help="Launch the interactive focal-plane SLM/Lyot diagnostic GUI.",
+    )
+    parser.add_argument(
+        "--html-slm-gui",
+        action="store_true",
+        help="Launch the browser-based focal-plane SLM/Lyot diagnostic GUI.",
+    )
+    parser.add_argument(
         "--feature",
         nargs="+",
         choices=[
@@ -788,6 +798,20 @@ def main() -> None:
         args.planet_flux_ratio_local = float(args.cdi_planet_flux_ratio)
     args.coc_fov_position_steps = int(getattr(args, "cdi_fov_position_steps", 0))
     args.coc_fov_circle_of_circles_trace = bool(getattr(args, "cdi_fov_orbit_trace", False))
+    if bool(args.html_slm_gui):
+        if __package__:
+            from .html_slm_gui import launch_html_gui
+        else:
+            from coronagraph.html_slm_gui import launch_html_gui
+        launch_html_gui()
+        return
+    if bool(args.interactive_slm_gui):
+        if __package__:
+            from .interactive_slm_gui import launch_gui as slm_gui_main
+        else:
+            from coronagraph.interactive_slm_gui import launch_gui as slm_gui_main
+        slm_gui_main()
+        return
     if bool(args.gui):
         if __package__:
             from .gui import main as gui_main
