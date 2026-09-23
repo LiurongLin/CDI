@@ -104,6 +104,10 @@ class CoronagraphSimulator:
         Inner radius in lambda/D when ``focal_local_phase_shape="ring"``.
     focal_local_phase_outer_radius_lamD : float
         Outer radius in lambda/D when ``focal_local_phase_shape="ring"``.
+    focal_plane_phase_map_rad : np.ndarray or None
+        Optional arbitrary focal-plane phase map in radians, sampled on the
+        simulator FFT grid. This is added to the configured local circle/ring
+        phase map when focal-plane modulation is enabled.
     secondary_diameter_ratio : float
         Central obscuration diameter divided by primary diameter (0 to <1).
     spider_width_pixels : float
@@ -155,6 +159,7 @@ class CoronagraphSimulator:
         focal_local_phase_ring_center_lamD: tuple[float, float] = (0.0, 0.0),
         focal_local_phase_inner_radius_lamD: float = 0.0,
         focal_local_phase_outer_radius_lamD: float = 0.0,
+        focal_plane_phase_map_rad: np.ndarray | None = None,
         secondary_diameter_ratio: float = 0.0,
         spider_width_pixels: float = 0.0,
         spider_angles_deg: tuple[float, ...] = (0.0, 90.0),
@@ -209,6 +214,11 @@ class CoronagraphSimulator:
         )
         self.focal_local_phase_inner_radius_lamD = float(focal_local_phase_inner_radius_lamD)
         self.focal_local_phase_outer_radius_lamD = float(focal_local_phase_outer_radius_lamD)
+        self.focal_plane_phase_map_rad = (
+            None
+            if focal_plane_phase_map_rad is None
+            else np.asarray(focal_plane_phase_map_rad, dtype=float)
+        )
         self.secondary_diameter_ratio = float(secondary_diameter_ratio)
         self.spider_width_pixels = float(spider_width_pixels)
         self.spider_angles_deg = tuple(float(a) for a in spider_angles_deg)
@@ -256,6 +266,14 @@ class CoronagraphSimulator:
 
         # Ensures focal-plane sampling = N_fft / D_pixels.
         self.n_fft = int(np.ceil(self.pupil_pixels * self.focal_sampling))
+        if (
+            self.focal_plane_phase_map_rad is not None
+            and self.focal_plane_phase_map_rad.shape != (self.n_fft, self.n_fft)
+        ):
+            raise ValueError(
+                "focal_plane_phase_map_rad must have shape "
+                f"({self.n_fft}, {self.n_fft}), got {self.focal_plane_phase_map_rad.shape}."
+            )
 
         self._x, self._y = self._centered_coordinates(self.n_fft)
 
@@ -482,12 +500,16 @@ class CoronagraphSimulator:
         Piecewise-constant focal-plane phase map (radians) on the first focal plane.
         Non-zero only inside configured local regions.
         """
+        phase_map = np.zeros((self.n_fft, self.n_fft), dtype=float)
+        if self.focal_plane_phase_map_rad is not None:
+            phase_map = phase_map + self.focal_plane_phase_map_rad
+
         if np.isclose(self.focal_local_phase_offset, 0.0):
-            return np.zeros((self.n_fft, self.n_fft), dtype=float)
+            return phase_map
 
         if self.focal_local_phase_shape == "ring":
             if self.focal_local_phase_outer_radius_lamD <= self.focal_local_phase_inner_radius_lamD:
-                return np.zeros((self.n_fft, self.n_fft), dtype=float)
+                return phase_map
             cache_key = (
                 self.n_fft,
                 self.focal_sampling,
@@ -501,7 +523,7 @@ class CoronagraphSimulator:
                 self.focal_local_phase_radius_lamD <= 0.0
                 or len(self.focal_local_phase_centers_lamD) == 0
             ):
-                return np.zeros((self.n_fft, self.n_fft), dtype=float)
+                return phase_map
             cache_key = (
                 self.n_fft,
                 self.focal_sampling,
@@ -529,7 +551,7 @@ class CoronagraphSimulator:
                     region |= (x_lamD - xc) ** 2 + (y_lamD - yc) ** 2 <= r2
             self._LOCAL_PHASE_REGION_CACHE[cache_key] = region
 
-        return self.focal_local_phase_offset * region.astype(float)
+        return phase_map + self.focal_local_phase_offset * region.astype(float)
 
     def _lyot_stop(self) -> np.ndarray:
         cache_key = (self.n_fft, self.pupil_pixels, self.lyot_scale)
@@ -805,6 +827,7 @@ class CoronagraphSimulator:
             focal_local_phase_ring_center_lamD=self.focal_local_phase_ring_center_lamD,
             focal_local_phase_inner_radius_lamD=self.focal_local_phase_inner_radius_lamD,
             focal_local_phase_outer_radius_lamD=self.focal_local_phase_outer_radius_lamD,
+            focal_plane_phase_map_rad=self.focal_plane_phase_map_rad,
             secondary_diameter_ratio=self.secondary_diameter_ratio,
             spider_width_pixels=self.spider_width_pixels,
             spider_angles_deg=self.spider_angles_deg,
@@ -1140,4 +1163,9 @@ class CoronagraphSimulator:
             "focal_local_phase_ring_center_lamD": self.focal_local_phase_ring_center_lamD,
             "focal_local_phase_inner_radius_lamD": self.focal_local_phase_inner_radius_lamD,
             "focal_local_phase_outer_radius_lamD": self.focal_local_phase_outer_radius_lamD,
+            "focal_plane_phase_map_rad": (
+                None
+                if self.focal_plane_phase_map_rad is None
+                else np.array(self.focal_plane_phase_map_rad, copy=True)
+            ),
         }

@@ -38,6 +38,33 @@ class SimulatorLocalPhaseRegionTests(unittest.TestCase):
         self.assertTrue(np.all(phase_map[rr < 2.0] == 0.0))
         self.assertTrue(np.all(phase_map[rr > 3.0] == 0.0))
 
+    def test_arbitrary_focal_plane_phase_map_is_added_to_local_phase(self) -> None:
+        base = CoronagraphSimulator(pupil_pixels=8, focal_sampling=2.0)
+        custom = np.zeros((base.n_fft, base.n_fft), dtype=float)
+        custom[2, 3] = np.pi
+        sim = CoronagraphSimulator(
+            pupil_pixels=8,
+            focal_sampling=2.0,
+            focal_plane_phase_map_rad=custom,
+            focal_local_phase_offset=np.pi / 2.0,
+            focal_local_phase_shape="circle",
+            focal_local_phase_centers_lamD=((0.0, 0.0),),
+            focal_local_phase_radius_lamD=0.5,
+        )
+
+        phase_map = sim._local_focal_phase_map()
+
+        self.assertAlmostEqual(float(phase_map[2, 3]), np.pi)
+        self.assertGreater(float(np.max(phase_map)), np.pi / 2.0)
+
+    def test_arbitrary_focal_plane_phase_map_shape_must_match_fft_grid(self) -> None:
+        with self.assertRaises(ValueError):
+            CoronagraphSimulator(
+                pupil_pixels=8,
+                focal_sampling=2.0,
+                focal_plane_phase_map_rad=np.zeros((3, 3), dtype=float),
+            )
+
     def test_phase_screen_uses_first_cube_plane_on_pupil_grid(self) -> None:
         cube = np.zeros((2, 4, 4), dtype=float)
         cube[0] = np.arange(16, dtype=float).reshape(4, 4)
