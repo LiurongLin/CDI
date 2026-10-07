@@ -98,8 +98,12 @@ class InteractiveSLMGuiTests(unittest.TestCase):
         coherent_power = sweep["powers"]["coherent"]
         phases = sweep["phases"]
         c1 = np.mean(coherent_power * np.exp(-1j * phases))
+        speckle_response = sweep["powers"]["coherent"] - sweep["powers"]["star"]
+        planet_response = sweep["powers"]["incoherent"] - sweep["powers"]["star"]
 
         np.testing.assert_allclose(phases, [0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi])
+        np.testing.assert_allclose(sweep["responses"]["speckle_response"], speckle_response)
+        np.testing.assert_allclose(sweep["responses"]["planet_response"], planet_response)
         self.assertAlmostEqual(
             sweep["metrics"]["coherent"]["M_harmonic"],
             float(abs(c1)),
@@ -110,8 +114,18 @@ class InteractiveSLMGuiTests(unittest.TestCase):
             float(np.angle(c1)),
             places=10,
         )
-        self.assertIn("R_mod_harmonic", sweep["metrics"]["ratios"])
-        self.assertIn("R_mod_pp", sweep["metrics"]["ratios"])
+        self.assertIn("speckle_response", sweep["metrics"])
+        self.assertIn("planet_response", sweep["metrics"])
+        self.assertIn("R_response_harmonic", sweep["metrics"]["ratios"])
+        self.assertIn("R_response_pp", sweep["metrics"]["ratios"])
+        self.assertNotIn("R_mod_harmonic", sweep["metrics"]["ratios"])
+        self.assertNotIn("R_mod_pp", sweep["metrics"]["ratios"])
+        self.assertAlmostEqual(
+            sweep["metrics"]["ratios"]["R_response_pp"],
+            sweep["metrics"]["speckle_response"]["M_pp"]
+            / sweep["metrics"]["planet_response"]["M_pp"],
+            places=10,
+        )
 
     def test_phase_sweep_incoherent_power_sums_star_and_planet_intensities(self) -> None:
         calc = SLMLyotResponseCalculator(
@@ -222,6 +236,8 @@ class InteractiveSLMGuiTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(full_reference["metrics"]["star"]["M_harmonic"], 0.0, places=10)
+        self.assertIsNone(full_reference["metrics"]["ratios"]["R_response_harmonic"])
+        self.assertIsNone(full_reference["metrics"]["ratios"]["R_response_pp"])
         self.assertGreater(no_reference["metrics"]["star"]["M_harmonic"], 0.0)
         self.assertEqual(no_reference["lyot_reference_scale"], 0.0)
 
@@ -303,7 +319,7 @@ class InteractiveSLMGuiTests(unittest.TestCase):
             )
         )
 
-    def test_each_speckle_uses_same_focal_plane_intensity_as_planet(self) -> None:
+    def test_speckle_intensity_ratio_uses_square_root_field_scaling(self) -> None:
         calc = SLMLyotResponseCalculator(
             SLMLyotConfig(
                 pupil_pixels=10,
@@ -325,20 +341,184 @@ class InteractiveSLMGuiTests(unittest.TestCase):
             include_planet=True,
             include_speckles=True,
             star_planet_ratio=400.0,
-            star_speckle_ratio=1.0,
+            star_speckle_ratio=100.0,
+        )
+
+        self.assertAlmostEqual(
+            result["metrics"]["A_speckle"],
+            result["metrics"]["A_planet"] * np.sqrt(400.0 / 100.0),
+            places=10,
+        )
+
+    def test_mask_template_placement_translates_without_clipping(self) -> None:
+        calc = SLMLyotResponseCalculator(
+            SLMLyotConfig(
+                pupil_pixels=10,
+                focal_sampling=2.0,
+                phase_mask=NoPhaseMask(),
+                companion_offset_lamD=(2.0, 0.0),
+            )
+        )
+        template = np.zeros((calc.n_fft, calc.n_fft), dtype=bool)
+        center = int(round((calc.n_fft - 1) / 2.0))
+        template[center, center] = True
+        template[center, center + 1] = True
+
+        placed = calc.place_mask_template(template, (2.0, 0.0))
+        target_x, target_y = placed["target_pixel"]
+
+        self.assertTrue(placed["mask"][target_y, target_x])
+        self.assertTrue(placed["mask"][target_y, target_x + 1])
+        self.assertEqual(placed["selected_pixels"], 2)
+
+    def test_comparison_uses_same_phase_sequence_and_separate_placements(self) -> None:
+        calc = SLMLyotResponseCalculator(
+            SLMLyotConfig(
+                pupil_pixels=8,
+                focal_sampling=2.0,
+                phase_mask=NoPhaseMask(),
+                companion_offset_lamD=(2.0, 0.0),
+                custom_speckle_offsets_lamD=((0.0, 2.0),),
+                ghost_fraction=0.0,
+                include_ghost=False,
+                include_interference=False,
+            )
+        )
+        template = np.zeros((calc.n_fft, calc.n_fft), dtype=bool)
+        center = int(round((calc.n_fft - 1) / 2.0))
+        template[center, center] = True
+
+        comparison = calc.comparison_sweeps(
+            template,
+            selected_speckle_index=0,
+            phase_steps=4,
+            include_star=True,
+            include_planet=True,
+            include_speckles=True,
         )
 
         np.testing.assert_allclose(
-            result["fields"]["speckle"]["delta"],
-            result["fields"]["planet"]["delta"],
-            rtol=1e-12,
-            atol=1e-12,
+            comparison["sweeps"]["speckle_position"]["phases"],
+            comparison["sweeps"]["planet_position"]["phases"],
         )
+        self.assertNotEqual(
+            comparison["placements"]["speckle_position"]["target_pixel"],
+            comparison["placements"]["planet_position"]["target_pixel"],
+        )
+        self.assertIn("main_speckle_pp", comparison["metrics"])
+        self.assertIn("main_planet_pp", comparison["metrics"])
+        self.assertIn("ratio_pp", comparison["metrics"])
+
+    def test_phase_zero_matching_calibrates_speckle_ratio(self) -> None:
+        calc = SLMLyotResponseCalculator(
+            SLMLyotConfig(
+                pupil_pixels=8,
+                focal_sampling=2.0,
+                phase_mask=NoPhaseMask(),
+                companion_offset_lamD=(2.0, 0.0),
+                custom_speckle_offsets_lamD=((0.0, 2.0),),
+                ghost_fraction=0.0,
+                include_ghost=False,
+                include_interference=False,
+            )
+        )
+
+        calibration = calc.calibrate_star_speckle_ratio_for_phase_zero_match(
+            selected_speckle_indices=(0,),
+            star_planet_ratio=400.0,
+        )
+        mask = np.zeros((calc.n_fft, calc.n_fft), dtype=bool)
+        sweep = calc.phase_sweep(
+            mask,
+            phase_steps=2,
+            include_star=True,
+            include_planet=True,
+            include_speckles=True,
+            selected_speckle_indices=(0,),
+            star_planet_ratio=400.0,
+            star_speckle_ratio=calibration["star_speckle_ratio"],
+        )
+
+        self.assertGreater(calibration["star_speckle_ratio"], 0.0)
         self.assertAlmostEqual(
-            result["metrics"]["A_speckle"],
-            result["metrics"]["A_planet"],
+            sweep["powers"]["coherent"][0],
+            sweep["powers"]["incoherent"][0],
             places=10,
         )
+
+    def test_html_phase_zero_match_payload_is_serialized(self) -> None:
+        server = _SLMHtmlServer()
+        calibration = server.calculator.calibrate_star_speckle_ratio_for_phase_zero_match(
+            selected_speckle_indices=(0,),
+            star_planet_ratio=500.0,
+        )
+        mask = np.zeros((server.calculator.n_fft, server.calculator.n_fft), dtype=bool)
+        sweep = server.calculator.phase_sweep(
+            mask,
+            phase_steps=2,
+            include_star=True,
+            include_planet=True,
+            include_speckles=True,
+            selected_speckle_indices=(0,),
+            star_planet_ratio=500.0,
+            star_speckle_ratio=calibration["star_speckle_ratio"],
+        )
+        sweep["phase_zero_match"] = calibration
+
+        payload = server.phase_sweep_payload(sweep)
+
+        self.assertIn("phase_zero_match", payload)
+        self.assertAlmostEqual(
+            payload["phase_zero_match"]["star_speckle_ratio"],
+            calibration["star_speckle_ratio"],
+            places=10,
+        )
+
+    def test_circle_optimization_varies_only_radius(self) -> None:
+        calc = SLMLyotResponseCalculator(
+            SLMLyotConfig(
+                pupil_pixels=8,
+                focal_sampling=2.0,
+                phase_mask=NoPhaseMask(),
+                companion_offset_lamD=(2.0, 0.0),
+                custom_speckle_offsets_lamD=((0.0, 2.0),),
+                ghost_fraction=0.0,
+                include_ghost=False,
+                include_interference=False,
+            )
+        )
+        center = int(round((calc.n_fft - 1) / 2.0))
+        yy, xx = np.indices((calc.n_fft, calc.n_fft))
+        template = (xx - center) ** 2 + (yy - center) ** 2 <= 2**2
+
+        optimization = calc.optimize_common_mask(
+            template,
+            optimization_mode="circle_size",
+            circle_center_pixel=(center, center),
+            circle_radius_min_px=1,
+            circle_radius_max_px=3,
+            selected_speckle_index=0,
+            phase_steps=2,
+            iterations=3,
+            include_star=True,
+            include_planet=True,
+            include_speckles=True,
+        )
+
+        self.assertEqual(optimization["optimization_mode"], "circle_size")
+        self.assertEqual(
+            [item["name"] for item in optimization["history"]],
+            ["circle_radius_1px", "circle_radius_2px", "circle_radius_3px"],
+        )
+        for item in optimization["history"]:
+            if item["ratio_pp"] is None:
+                self.assertEqual(item["score"], -np.inf)
+            else:
+                self.assertEqual(item["score"], item["ratio_pp"])
+        for item in optimization["history"]:
+            radius = int(item["name"].split("_")[-1].removesuffix("px"))
+            expected = (xx - center) ** 2 + (yy - center) ** 2 <= radius**2
+            np.testing.assert_array_equal(item["mask"], expected)
 
     def test_incoherent_map_combines_star_and_planet_without_speckles(self) -> None:
         calc = SLMLyotResponseCalculator(
@@ -508,6 +688,24 @@ class InteractiveSLMGuiTests(unittest.TestCase):
         self.assertEqual(result["speckle_offsets_lamD"], ())
         self.assertEqual(result["selected_speckle_indices"], ())
         self.assertNotIn("A_speckle", result["metrics"])
+
+    def test_html_phase_sweep_payload_includes_response_arrays(self) -> None:
+        server = _SLMHtmlServer()
+        mask = np.zeros((server.calculator.n_fft, server.calculator.n_fft), dtype=bool)
+        mask[server.calculator.n_fft // 2 :, :] = True
+        sweep = server.calculator.phase_sweep(mask, phase_steps=4)
+
+        payload = server.phase_sweep_payload(sweep)
+
+        self.assertIn("responses", payload)
+        self.assertIn("speckle_response", payload["responses"])
+        self.assertIn("planet_response", payload["responses"])
+        self.assertEqual(len(payload["responses"]["speckle_response"]), 4)
+        self.assertEqual(len(payload["responses"]["planet_response"]), 4)
+        self.assertIn("R_response_harmonic", payload["metrics"]["ratios"])
+        self.assertIn("R_response_pp", payload["metrics"]["ratios"])
+        self.assertNotIn("R_mod_harmonic", payload["metrics"]["ratios"])
+        self.assertNotIn("R_mod_pp", payload["metrics"]["ratios"])
 
 
 if __name__ == "__main__":

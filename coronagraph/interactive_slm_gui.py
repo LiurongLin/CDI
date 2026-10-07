@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -207,6 +208,73 @@ class SLMLyotResponseCalculator:
         )
         return sim._coherent_ring_speckle_offsets_lamD()
 
+    def source_pixel(
+        self,
+        source_offset_lamD: tuple[float, float],
+    ) -> tuple[int, int]:
+        """Return the nearest focal-grid pixel for a source offset in lambda/D."""
+        cx = (self.n_fft - 1) / 2.0
+        cy = (self.n_fft - 1) / 2.0
+        x = int(round(cx + float(source_offset_lamD[0]) * self.focal_sampling))
+        y = int(round(cy + float(source_offset_lamD[1]) * self.focal_sampling))
+        return x, y
+
+    def place_mask_template(
+        self,
+        template_mask: np.ndarray,
+        source_offset_lamD: tuple[float, float],
+        *,
+        anchor_pixel: tuple[int, int] | None = None,
+    ) -> dict:
+        """Translate one binary mask template so its anchor lands on a source position."""
+        template = np.asarray(template_mask, dtype=bool)
+        if template.shape != (self.n_fft, self.n_fft):
+            raise ValueError(f"SLM template must have shape ({self.n_fft}, {self.n_fft}).")
+        if anchor_pixel is None:
+            anchor = (int(round((self.n_fft - 1) / 2.0)), int(round((self.n_fft - 1) / 2.0)))
+        else:
+            anchor = (int(anchor_pixel[0]), int(anchor_pixel[1]))
+        if not (0 <= anchor[0] < self.n_fft and 0 <= anchor[1] < self.n_fft):
+            raise ValueError("Mask template anchor is outside the SLM grid.")
+
+        target = self.source_pixel(source_offset_lamD)
+        if not (0 <= target[0] < self.n_fft and 0 <= target[1] < self.n_fft):
+            raise ValueError(
+                "Source position is outside the SLM grid: "
+                f"{source_offset_lamD} lambda/D maps to pixel {target}."
+            )
+
+        yy, xx = np.nonzero(template)
+        placed = np.zeros_like(template, dtype=bool)
+        dx = target[0] - anchor[0]
+        dy = target[1] - anchor[1]
+        if xx.size:
+            new_x = xx + dx
+            new_y = yy + dy
+            inside = (
+                (new_x >= 0)
+                & (new_y >= 0)
+                & (new_x < self.n_fft)
+                & (new_y < self.n_fft)
+            )
+            if not np.all(inside):
+                clipped = int(np.count_nonzero(~inside))
+                raise ValueError(
+                    "Placed mask would clip at the SLM grid boundary: "
+                    f"{clipped} selected template pixels are outside the grid. "
+                    f"Target pixel is {target}."
+                )
+            placed[new_y, new_x] = True
+
+        return {
+            "mask": placed,
+            "anchor_pixel": anchor,
+            "target_pixel": target,
+            "source_offset_lamD": (float(source_offset_lamD[0]), float(source_offset_lamD[1])),
+            "translation_pixels": (int(dx), int(dy)),
+            "selected_pixels": int(np.count_nonzero(placed)),
+        }
+
     def propagate(
         self,
         slm_region_mask: np.ndarray,
@@ -330,7 +398,8 @@ class SLMLyotResponseCalculator:
         else:
             speckle_offsets = speckle_offsets_all
         if speckle_offsets:
-            speckle_amp = 1.0 / np.sqrt(star_planet_ratio)
+            star_speckle_ratio = _positive_ratio(star_speckle_ratio, "star_speckle_ratio")
+            speckle_amp = 1.0 / np.sqrt(star_speckle_ratio)
             e0_total = np.zeros_like(zero)
             em_total = np.zeros_like(zero)
             raw_total = np.zeros_like(zero)
@@ -414,6 +483,8 @@ class SLMLyotResponseCalculator:
         slm_region_mask: np.ndarray,
         *,
         phase_steps: int = 4,
+        phase_start_rad: float = 0.0,
+        phase_span_rad: float = 2.0 * np.pi,
         subtraction_mode: str = "field",
         lyot_reference_scale: float | None = None,
         include_star: bool = True,
@@ -422,10 +493,15 @@ class SLMLyotResponseCalculator:
         selected_speckle_indices: tuple[int, ...] | list[int] | None = None,
         star_planet_ratio: float = 500.0,
         star_speckle_ratio: float = 100.0,
+        progress_callback: Callable[[dict], None] | None = None,
     ) -> dict:
         n_steps = int(phase_steps)
         if n_steps < 2:
             raise ValueError("phase_steps must be >= 2.")
+        phase_start = float(phase_start_rad)
+        phase_span = float(phase_span_rad)
+        if not np.isfinite(phase_start) or not np.isfinite(phase_span):
+            raise ValueError("phase_start_rad and phase_span_rad must be finite.")
         mode = str(subtraction_mode).strip().lower().replace("_", "-")
         if mode in {"electric", "electric-field", "field", "field-subtraction"}:
             mode = "field"
@@ -433,7 +509,7 @@ class SLMLyotResponseCalculator:
             mode = "intensity"
         else:
             raise ValueError("subtraction_mode must be 'field' or 'intensity'.")
-        phases = 2.0 * np.pi * np.arange(n_steps, dtype=float) / float(n_steps)
+        phases = phase_start + phase_span * np.arange(n_steps, dtype=float) / float(n_steps)
         powers = {
             "star": np.zeros(n_steps, dtype=float),
             "speckle": np.zeros(n_steps, dtype=float),
@@ -444,6 +520,14 @@ class SLMLyotResponseCalculator:
 
         last_result: dict | None = None
         for idx, phase in enumerate(phases):
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase_index": int(idx + 1),
+                        "phase_count": int(n_steps),
+                        "phase_rad": float(phase),
+                    }
+                )
             result = self.propagate(
                 slm_region_mask,
                 include_star=include_star,
@@ -478,18 +562,35 @@ class SLMLyotResponseCalculator:
             name: self._phase_power_metrics(power, phases)
             for name, power in powers.items()
         }
+        responses = {
+            "speckle_response": powers["coherent"] - powers["star"],
+            "planet_response": powers["incoherent"] - powers["star"],
+        }
+        metrics.update(
+            {
+                name: self._phase_power_metrics(response, phases)
+                for name, response in responses.items()
+            }
+        )
         metrics["ratios"] = {
-            "R_mod_harmonic": metrics["coherent"]["M_harmonic"]
-            / (metrics["incoherent"]["M_harmonic"] + 1e-30),
-            "R_mod_pp": metrics["coherent"]["M_pp"]
-            / (metrics["incoherent"]["M_pp"] + 1e-30),
+            "R_response_harmonic": self._safe_ratio(
+                metrics["speckle_response"]["M_harmonic"],
+                metrics["planet_response"]["M_harmonic"],
+            ),
+            "R_response_pp": self._safe_ratio(
+                metrics["speckle_response"]["M_pp"],
+                metrics["planet_response"]["M_pp"],
+            ),
         }
 
         return {
             "phases": phases,
             "powers": powers,
+            "responses": responses,
             "metrics": metrics,
             "phase_steps": n_steps,
+            "phase_start_rad": phase_start,
+            "phase_span_rad": phase_span,
             "subtraction_mode": mode,
             "lyot_reference_scale": (
                 float(self.config.lyot_reference_scale)
@@ -510,6 +611,461 @@ class SLMLyotResponseCalculator:
             "include_planet": bool(include_planet),
             "include_speckles": bool(include_speckles),
         }
+
+    def calibrate_star_speckle_ratio_for_phase_zero_match(
+        self,
+        *,
+        selected_speckle_indices: tuple[int, ...] | list[int] | None = None,
+        star_planet_ratio: float = 500.0,
+        lyot_reference_scale: float | None = None,
+        subtraction_mode: str = "field",
+    ) -> dict:
+        """Find star/speckle ratio that matches coherent and incoherent power at phase zero."""
+        star_planet_ratio = _positive_ratio(star_planet_ratio, "star_planet_ratio")
+        mode = str(subtraction_mode).strip().lower().replace("_", "-")
+        if mode in {"electric", "electric-field", "field", "field-subtraction"}:
+            mode = "field"
+        elif mode in {"intensity", "intensity-subtraction"}:
+            mode = "intensity"
+        else:
+            raise ValueError("subtraction_mode must be 'field' or 'intensity'.")
+
+        zero_mask = np.zeros((self.n_fft, self.n_fft), dtype=bool)
+        star_only = self.propagate(
+            zero_mask,
+            include_star=True,
+            include_planet=False,
+            include_speckles=False,
+            star_planet_ratio=star_planet_ratio,
+            star_speckle_ratio=1.0,
+            phase_modulation_rad=0.0,
+            lyot_reference_scale=lyot_reference_scale,
+        )
+        planet_only = self.propagate(
+            zero_mask,
+            include_star=False,
+            include_planet=True,
+            include_speckles=False,
+            star_planet_ratio=star_planet_ratio,
+            star_speckle_ratio=1.0,
+            phase_modulation_rad=0.0,
+            lyot_reference_scale=lyot_reference_scale,
+        )
+        speckle_unit = self.propagate(
+            zero_mask,
+            include_star=False,
+            include_planet=False,
+            include_speckles=True,
+            selected_speckle_indices=selected_speckle_indices,
+            star_planet_ratio=star_planet_ratio,
+            star_speckle_ratio=1.0,
+            phase_modulation_rad=0.0,
+            lyot_reference_scale=lyot_reference_scale,
+        )
+
+        if not speckle_unit["speckle_offsets_lamD"]:
+            raise ValueError("At least one selected speckle is required for phase-zero matching.")
+
+        if mode == "intensity":
+            star_field = (
+                np.asarray(star_only["fields"]["star"]["raw_modulated"], dtype=np.complex128)
+                - np.asarray(star_only["fields"]["star"]["reference"], dtype=np.complex128)
+            )
+            speckle_field = np.asarray(
+                speckle_unit["fields"]["speckle"]["raw_modulated"],
+                dtype=np.complex128,
+            )
+        else:
+            star_field = np.asarray(
+                star_only["fields"]["star"]["modulated"],
+                dtype=np.complex128,
+            )
+            speckle_field = np.asarray(
+                speckle_unit["fields"]["speckle"]["modulated"],
+                dtype=np.complex128,
+            )
+        planet_power = self._integrated_power(planet_only["fields"]["planet"]["modulated"])
+
+        stop = self.lyot_stop.astype(bool)
+        c = float(np.sum(np.abs(speckle_field[stop]) ** 2))
+        b = float(np.real(np.sum(star_field[stop] * np.conj(speckle_field[stop]))))
+        if c <= 0.0:
+            raise ValueError("Selected speckle has zero Lyot-stop power at phase zero.")
+
+        discriminant = b * b + c * planet_power
+        if discriminant < 0.0:
+            raise ValueError("No real phase-zero matching solution exists.")
+        amplitude = (-b + float(np.sqrt(discriminant))) / c
+        if amplitude <= 0.0 or not np.isfinite(amplitude):
+            raise ValueError("No positive phase-zero matching solution exists.")
+
+        ratio = 1.0 / (amplitude * amplitude)
+        coherent_power = self._integrated_power(star_field + amplitude * speckle_field)
+        incoherent_power = self._integrated_power(star_field) + planet_power
+        return {
+            "star_speckle_ratio": float(ratio),
+            "speckle_amplitude": float(amplitude),
+            "coherent_phase_zero_power": float(coherent_power),
+            "incoherent_phase_zero_power": float(incoherent_power),
+            "planet_phase_zero_power": float(planet_power),
+            "selected_speckle_indices": (
+                tuple(range(len(self._speckle_offsets())))
+                if selected_speckle_indices is None
+                else tuple(int(idx) for idx in selected_speckle_indices)
+            ),
+        }
+
+    def comparison_sweeps(
+        self,
+        template_mask: np.ndarray,
+        *,
+        selected_speckle_index: int = 0,
+        phase_steps: int = 8,
+        phase_start_rad: float = 0.0,
+        phase_span_rad: float = 2.0 * np.pi,
+        subtraction_mode: str = "field",
+        lyot_reference_scale: float | None = None,
+        include_star: bool = True,
+        include_planet: bool = True,
+        include_speckles: bool = True,
+        star_planet_ratio: float = 500.0,
+        star_speckle_ratio: float = 100.0,
+        progress_callback: Callable[[dict], None] | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> dict:
+        speckle_offsets = self._speckle_offsets()
+        if not speckle_offsets:
+            raise ValueError("At least one speckle position is required for comparison.")
+        idx = int(selected_speckle_index)
+        if idx < 0 or idx >= len(speckle_offsets):
+            raise IndexError(f"selected_speckle_index must be between 0 and {len(speckle_offsets) - 1}.")
+        selected_indices = (idx,)
+        speckle_offset = speckle_offsets[idx]
+        planet_offset = self.config.companion_offset_lamD
+
+        speckle_placement = self.place_mask_template(template_mask, speckle_offset)
+        planet_placement = self.place_mask_template(template_mask, planet_offset)
+
+        def stopped() -> bool:
+            return bool(stop_requested is not None and stop_requested())
+
+        completed: dict[str, dict] = {}
+        if progress_callback is not None:
+            progress_callback({"active_run": "speckle", "completed_runs": 0, "total_runs": 2})
+        if stopped():
+            return self._comparison_result(completed, speckle_placement, planet_placement)
+        completed["speckle_position"] = self.phase_sweep(
+            speckle_placement["mask"],
+            phase_steps=phase_steps,
+            phase_start_rad=phase_start_rad,
+            phase_span_rad=phase_span_rad,
+            subtraction_mode=subtraction_mode,
+            lyot_reference_scale=lyot_reference_scale,
+            include_star=include_star,
+            include_planet=include_planet,
+            include_speckles=include_speckles,
+            selected_speckle_indices=selected_indices,
+            star_planet_ratio=star_planet_ratio,
+            star_speckle_ratio=star_speckle_ratio,
+            progress_callback=(
+                None
+                if progress_callback is None
+                else lambda update: progress_callback(
+                    {"active_run": "speckle", "completed_runs": 0, "total_runs": 2, **update}
+                )
+            ),
+        )
+
+        if progress_callback is not None:
+            progress_callback({"active_run": "planet", "completed_runs": 1, "total_runs": 2})
+        if not stopped():
+            completed["planet_position"] = self.phase_sweep(
+                planet_placement["mask"],
+                phase_steps=phase_steps,
+                phase_start_rad=phase_start_rad,
+                phase_span_rad=phase_span_rad,
+                subtraction_mode=subtraction_mode,
+                lyot_reference_scale=lyot_reference_scale,
+                include_star=include_star,
+                include_planet=include_planet,
+                include_speckles=include_speckles,
+                selected_speckle_indices=selected_indices,
+                star_planet_ratio=star_planet_ratio,
+                star_speckle_ratio=star_speckle_ratio,
+                progress_callback=(
+                    None
+                    if progress_callback is None
+                    else lambda update: progress_callback(
+                        {"active_run": "planet", "completed_runs": 1, "total_runs": 2, **update}
+                    )
+                ),
+            )
+        if progress_callback is not None:
+            progress_callback({"active_run": "idle", "completed_runs": len(completed), "total_runs": 2})
+        return self._comparison_result(completed, speckle_placement, planet_placement)
+
+    def _comparison_result(
+        self,
+        sweeps: dict[str, dict],
+        speckle_placement: dict,
+        planet_placement: dict,
+    ) -> dict:
+        metrics: dict[str, object] = {"complete": set(sweeps) == {"speckle_position", "planet_position"}}
+        if "speckle_position" in sweeps:
+            metrics["main_speckle_pp"] = float(
+                sweeps["speckle_position"]["metrics"]["speckle_response"]["M_pp"]
+            )
+            metrics["speckle_run_planet_pp"] = float(
+                sweeps["speckle_position"]["metrics"]["planet_response"]["M_pp"]
+            )
+        if "planet_position" in sweeps:
+            metrics["main_planet_pp"] = float(
+                sweeps["planet_position"]["metrics"]["planet_response"]["M_pp"]
+            )
+            metrics["planet_run_speckle_pp"] = float(
+                sweeps["planet_position"]["metrics"]["speckle_response"]["M_pp"]
+            )
+            metrics["main_planet_mean"] = float(
+                sweeps["planet_position"]["metrics"]["planet_response"]["P_mean"]
+            )
+        if "main_speckle_pp" in metrics and "main_planet_pp" in metrics:
+            denominator = float(metrics["main_planet_pp"])
+            metrics["ratio_pp"] = self._safe_ratio(float(metrics["main_speckle_pp"]), denominator)
+            scale = max(abs(float(metrics["main_speckle_pp"])), 1.0)
+            metrics["ratio_denominator_near_zero"] = bool(abs(denominator) <= scale * 1e-12)
+        return {
+            "measurement_plane": "lyot_stop",
+            "primary_metric": "peak_to_peak",
+            "sweeps": sweeps,
+            "metrics": metrics,
+            "placements": {
+                "speckle_position": {
+                    key: value
+                    for key, value in speckle_placement.items()
+                    if key != "mask"
+                },
+                "planet_position": {
+                    key: value
+                    for key, value in planet_placement.items()
+                    if key != "mask"
+                },
+            },
+        }
+
+    def optimize_common_mask(
+        self,
+        initial_template_mask: np.ndarray,
+        *,
+        optimization_mode: str = "pixel_groups",
+        circle_center_pixel: tuple[int, int] | None = None,
+        circle_radius_min_px: int | None = None,
+        circle_radius_max_px: int | None = None,
+        selected_speckle_index: int = 0,
+        phase_steps: int = 4,
+        phase_start_rad: float = 0.0,
+        phase_span_rad: float = 2.0 * np.pi,
+        subtraction_mode: str = "field",
+        lyot_reference_scale: float | None = None,
+        include_star: bool = True,
+        include_planet: bool = True,
+        include_speckles: bool = True,
+        star_planet_ratio: float = 500.0,
+        star_speckle_ratio: float = 100.0,
+        search_radius_px: int = 24,
+        group_size_px: int = 4,
+        iterations: int = 16,
+        planet_penalty: float = 1.0,
+        random_seed: int = 1,
+        progress_callback: Callable[[dict], None] | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> dict:
+        template = np.asarray(initial_template_mask, dtype=bool)
+        if template.shape != (self.n_fft, self.n_fft):
+            raise ValueError(f"SLM template must have shape ({self.n_fft}, {self.n_fft}).")
+        mode = str(optimization_mode).strip().lower().replace("-", "_")
+        group = max(1, int(group_size_px))
+        radius = max(group, int(search_radius_px))
+        n_iter = max(1, int(iterations))
+        rng = np.random.default_rng(int(random_seed))
+
+        anchor = (int(round((self.n_fft - 1) / 2.0)), int(round((self.n_fft - 1) / 2.0)))
+        cy, cx = anchor[1], anchor[0]
+        y0 = max(0, cy - radius)
+        y1 = min(self.n_fft, cy + radius + 1)
+        x0 = max(0, cx - radius)
+        x1 = min(self.n_fft, cx + radius + 1)
+        block_origins = [
+            (y, x)
+            for y in range(y0, y1, group)
+            for x in range(x0, x1, group)
+        ]
+
+        def stopped() -> bool:
+            return bool(stop_requested is not None and stop_requested())
+
+        def square_template(size: int) -> np.ndarray:
+            mask = np.zeros_like(template, dtype=bool)
+            half = max(1, int(size)) // 2
+            mask[max(0, cy - half) : min(self.n_fft, cy + half + 1),
+                 max(0, cx - half) : min(self.n_fft, cx + half + 1)] = True
+            return mask
+
+        candidates: list[tuple[str, np.ndarray]]
+        if mode in {"circle", "circle_size", "circle_radius"}:
+            if circle_center_pixel is None:
+                circle_center = anchor
+            else:
+                circle_center = (int(circle_center_pixel[0]), int(circle_center_pixel[1]))
+            if not (
+                0 <= circle_center[0] < self.n_fft
+                and 0 <= circle_center[1] < self.n_fft
+            ):
+                raise ValueError("Circle center is outside the SLM grid.")
+            current_radius = int(round(np.sqrt(np.count_nonzero(template) / np.pi)))
+            if circle_radius_min_px is None:
+                r_min = max(1, current_radius - radius)
+            else:
+                r_min = max(1, int(circle_radius_min_px))
+            if circle_radius_max_px is None:
+                r_max = max(r_min, current_radius + radius)
+            else:
+                r_max = max(r_min, int(circle_radius_max_px))
+            r_max = min(
+                r_max,
+                circle_center[0],
+                circle_center[1],
+                self.n_fft - 1 - circle_center[0],
+                self.n_fft - 1 - circle_center[1],
+            )
+            if r_max < r_min:
+                raise ValueError("Circle radius range clips at the SLM grid boundary.")
+            radii = np.linspace(r_min, r_max, n_iter, dtype=float)
+            radii = sorted({int(round(value)) for value in radii})
+            yy, xx = np.indices(template.shape)
+            candidates = []
+            for candidate_radius in radii:
+                mask = (
+                    (xx - circle_center[0]) ** 2
+                    + (yy - circle_center[1]) ** 2
+                    <= int(candidate_radius) ** 2
+                )
+                candidates.append((f"circle_radius_{int(candidate_radius)}px", mask))
+        else:
+            candidates = [
+                ("empty_reference", np.zeros_like(template, dtype=bool)),
+                ("center_block_reference", square_template(group)),
+                ("initial_template", template.copy()),
+            ]
+            current = template.copy()
+            for idx in range(n_iter):
+                candidate = current.copy()
+                toggle_count = max(1, min(len(block_origins), int(rng.integers(1, 4))))
+                chosen = rng.choice(len(block_origins), size=toggle_count, replace=False)
+                for choice in np.atleast_1d(chosen):
+                    by, bx = block_origins[int(choice)]
+                    block = np.s_[by : min(self.n_fft, by + group), bx : min(self.n_fft, bx + group)]
+                    candidate[block] = ~candidate[block]
+                candidates.append((f"random_toggle_{idx + 1}", candidate))
+                current = candidate
+
+        history: list[dict] = []
+        best_index: int | None = None
+        best_score = -np.inf
+        for idx, (name, mask) in enumerate(candidates):
+            if stopped():
+                break
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "active_run": "optimize",
+                        "candidate": idx + 1,
+                        "candidate_count": len(candidates),
+                        "candidate_name": name,
+                    }
+                )
+            comparison = self.comparison_sweeps(
+                mask,
+                selected_speckle_index=selected_speckle_index,
+                phase_steps=phase_steps,
+                phase_start_rad=phase_start_rad,
+                phase_span_rad=phase_span_rad,
+                subtraction_mode=subtraction_mode,
+                lyot_reference_scale=lyot_reference_scale,
+                include_star=include_star,
+                include_planet=include_planet,
+                include_speckles=include_speckles,
+                star_planet_ratio=star_planet_ratio,
+                star_speckle_ratio=star_speckle_ratio,
+                stop_requested=stop_requested,
+            )
+            metrics = comparison["metrics"]
+            speckle_pp = float(metrics.get("main_speckle_pp", 0.0))
+            planet_pp = float(metrics.get("main_planet_pp", np.inf))
+            ratio_pp = metrics.get("ratio_pp")
+            score = -np.inf if ratio_pp is None else float(ratio_pp)
+            item = {
+                "index": idx,
+                "name": name,
+                "mask_pixels": int(np.count_nonzero(mask)),
+                "speckle_pp": speckle_pp,
+                "planet_pp": planet_pp,
+                "planet_mean": float(metrics.get("main_planet_mean", np.nan)),
+                "ratio_pp": ratio_pp,
+                "ratio_denominator_near_zero": bool(
+                    metrics.get("ratio_denominator_near_zero", False)
+                ),
+                "score": float(score),
+                "mask": mask.copy(),
+                "comparison": comparison,
+            }
+            history.append(item)
+            if score > best_score:
+                best_score = float(score)
+                best_index = len(history) - 1
+
+        pareto_indices: list[int] = []
+        for i, item in enumerate(history):
+            dominated = False
+            for j, other in enumerate(history):
+                if i == j:
+                    continue
+                if (
+                    other["speckle_pp"] >= item["speckle_pp"]
+                    and other["planet_pp"] <= item["planet_pp"]
+                    and (
+                        other["speckle_pp"] > item["speckle_pp"]
+                        or other["planet_pp"] < item["planet_pp"]
+                    )
+                ):
+                    dominated = True
+                    break
+            if not dominated:
+                pareto_indices.append(i)
+
+        if progress_callback is not None:
+            progress_callback({"active_run": "idle"})
+
+        return {
+            "primary_metric": "peak_to_peak",
+            "optimization_mode": mode,
+            "search_radius_px": int(radius),
+            "group_size_px": int(group),
+            "iterations": int(n_iter),
+            "planet_penalty": float(planet_penalty),
+            "random_seed": int(random_seed),
+            "history": history,
+            "best_index": best_index,
+            "pareto_indices": pareto_indices,
+            "stopped": stopped(),
+        }
+
+    @staticmethod
+    def _safe_ratio(numerator: float, denominator: float) -> float | None:
+        numerator = float(numerator)
+        denominator = float(denominator)
+        if denominator == 0.0:
+            return None
+        return numerator / denominator
 
     def _integrated_power(self, field: np.ndarray) -> float:
         stop = self.lyot_stop.astype(bool)
@@ -980,12 +1536,16 @@ def launch_gui() -> None:
         ax_phase_sweep.legend(loc="best", fontsize=7, framealpha=0.88)
 
         metrics = sweep["metrics"]
+
+        def format_ratio(value: float | None) -> str:
+            return "undefined" if value is None else f"{value:.6e}"
+
         rows = [
-            f"R_mod_harmonic = {metrics['ratios']['R_mod_harmonic']:.6e}",
-            f"R_mod_pp = {metrics['ratios']['R_mod_pp']:.6e}",
+            f"R_response_harmonic = {format_ratio(metrics['ratios']['R_response_harmonic'])}",
+            f"R_response_pp = {format_ratio(metrics['ratios']['R_response_pp'])}",
             "",
         ]
-        for name in ("coherent", "incoherent", "star", "speckle", "planet"):
+        for name in ("speckle_response", "planet_response", "coherent", "incoherent", "star", "speckle", "planet"):
             item = metrics[name]
             rows.extend(
                 [
