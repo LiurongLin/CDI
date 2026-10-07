@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -30,6 +31,7 @@ HTML = r"""<!doctype html>
       --yellow: #c28a00;
       --cyan: #007f91;
       --magenta: #9a3aa5;
+      --green: #168245;
     }
     * { box-sizing: border-box; }
     body {
@@ -40,7 +42,7 @@ HTML = r"""<!doctype html>
     }
     .app {
       display: grid;
-      grid-template-columns: 280px minmax(420px, 1.1fr) minmax(520px, 1fr);
+      grid-template-columns: minmax(340px, 380px) minmax(420px, 0.95fr) minmax(540px, 1.15fr);
       gap: 14px;
       min-height: 100vh;
       padding: 14px;
@@ -52,14 +54,45 @@ HTML = r"""<!doctype html>
       padding: 14px;
       min-width: 0;
     }
+    .controls {
+      max-height: calc(100vh - 28px);
+      overflow-y: auto;
+    }
     h1, h2 {
       margin: 0 0 12px;
       line-height: 1.15;
     }
     h1 { font-size: 20px; }
-    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
     label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
-    .field { margin-bottom: 12px; }
+    .field { margin-bottom: 10px; }
+    .control-group {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .run-group {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      box-shadow: 0 3px 10px rgba(24, 32, 42, 0.08);
+    }
+    .control-group h2 { margin-bottom: 10px; }
+    .control-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .control-grid .full { grid-column: 1 / -1; }
+    .compact-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .compact-row > * { flex: 1 1 120px; }
     .checkrow {
       display: flex;
       align-items: center;
@@ -67,6 +100,13 @@ HTML = r"""<!doctype html>
       margin-bottom: 10px;
       font-size: 14px;
     }
+    .inline-checks {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .inline-checks .checkrow { margin-bottom: 0; }
     input[type="number"], select {
       width: 100%;
       height: 34px;
@@ -78,13 +118,15 @@ HTML = r"""<!doctype html>
       font: inherit;
     }
     button {
-      height: 34px;
+      min-height: 36px;
       border: 1px solid #b9c0c9;
       border-radius: 6px;
       background: #fff;
       color: var(--text);
       font: inherit;
       cursor: pointer;
+      padding: 6px 10px;
+      line-height: 1.15;
     }
     button.primary {
       background: var(--blue);
@@ -101,6 +143,18 @@ HTML = r"""<!doctype html>
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
+    }
+    .button-grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .button-grid .wide {
+      grid-column: 1 / -1;
+      height: 40px;
+      font-weight: 650;
+    }
+    .button-grid .danger {
+      border-color: #b84a4a;
+      color: #9b1c1c;
     }
     .param-card {
       border: 1px solid var(--line);
@@ -131,11 +185,9 @@ HTML = r"""<!doctype html>
       height: 30px;
     }
     .source-geometry {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfd;
-      padding: 10px;
-      margin-bottom: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      margin-top: 10px;
     }
     .speckle-row {
       display: grid;
@@ -215,6 +267,25 @@ HTML = r"""<!doctype html>
       overflow: hidden;
       margin-top: 12px;
     }
+    .plot-canvas.short { height: 210px; }
+    .plots-panel {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .comparison-summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .comparison-summary .metric {
+      background: #fff;
+      border-color: #c7d7e8;
+    }
+    .comparison-summary .metric strong {
+      font-size: 16px;
+    }
     .results {
       margin-top: 12px;
       display: grid;
@@ -232,7 +303,11 @@ HTML = r"""<!doctype html>
     .metric strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
     .status {
       margin-top: 10px;
-      min-height: 22px;
+      min-height: 34px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
       font-size: 13px;
       color: var(--muted);
     }
@@ -241,14 +316,32 @@ HTML = r"""<!doctype html>
       color: var(--muted);
       line-height: 1.35;
     }
+    details.advanced {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    details.advanced summary {
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--text);
+    }
+    details.advanced .advanced-body {
+      margin-top: 12px;
+    }
     @media (max-width: 1200px) {
-      .app { grid-template-columns: 280px minmax(420px, 1fr); }
+      .app { grid-template-columns: 360px minmax(420px, 1fr); }
       .right { grid-column: 1 / -1; }
+      .controls { max-height: none; }
     }
     @media (max-width: 760px) {
       .app { grid-template-columns: 1fr; }
       .canvas-wrap { min-height: 280px; }
       .map-grid { grid-template-columns: 1fr; }
+      .control-grid, .comparison-summary, .inline-checks { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -256,118 +349,194 @@ HTML = r"""<!doctype html>
   <main class="app">
     <section class="panel controls">
       <h1>SLM Lyot Diagnostic</h1>
-      <h2>Sources</h2>
-      <label class="checkrow"><input id="starEnabled" type="checkbox" checked /> Star</label>
-      <label class="checkrow"><input id="planetEnabled" type="checkbox" checked /> Planet</label>
-      <div class="field">
-        <label for="starPlanetRatio">Star / Planet intensity ratio</label>
-        <input id="starPlanetRatio" type="number" min="1e-12" step="1" value="500" />
-      </div>
-      <label class="checkrow"><input id="specklesEnabled" type="checkbox" /> Speckles</label>
-      <div class="field">
-        <div class="axis-note">Each selected speckle uses the same focal-plane intensity as the planet.</div>
-      </div>
-      <div class="field">
-        <label>Enabled speckles</label>
-        <div id="speckleSelector" class="axis-note">Speckle list loads with the SLM grid.</div>
-      </div>
-      <div class="source-geometry">
-        <div class="param-card-title">Source locations [lambda/D]</div>
-        <div class="param-row">
-          <label for="planetX">Planet X</label>
-          <input id="planetX" type="number" step="0.1" value="4.0" />
-        </div>
-        <div class="param-row">
-          <label for="planetY">Planet Y</label>
-          <input id="planetY" type="number" step="0.1" value="0.0" />
-        </div>
-        <label>Speckle positions</label>
-        <div id="speckleEditor"></div>
+
+      <div class="control-group run-group">
+        <h2>Run</h2>
         <div class="button-grid">
-          <button id="addSpeckleBtn">Add Speckle</button>
-          <button id="updateSourcesBtn">Update Sources</button>
+          <button class="primary wide" id="runComparisonBtn">Run comparison</button>
+          <button id="runSpeckleSweepBtn">Run speckle sweep</button>
+          <button id="runPlanetSweepBtn">Run planet sweep</button>
+          <button class="danger" id="stopBtn">Stop</button>
+          <button id="resetPhaseBtn">Reset phase</button>
         </div>
-        <div class="axis-note">Changing source locations does not propagate until Apply is pressed.</div>
+        <div id="status" class="status">Ready.</div>
       </div>
-      <h2>Modulation</h2>
-      <div class="field">
-        <label for="tool">Drawing tool</label>
-        <select id="tool">
-          <option value="freehand">Freehand pixels</option>
-          <option value="circle">Circle</option>
-          <option value="ring">Ring / Annulus</option>
-        </select>
-      </div>
-      <div class="param-card" id="shapeParams">
-        <div class="param-card-title">Shape parameters</div>
-        <div class="param-row shape-control shape-center">
-          <label for="centerX">Center X [px]</label>
-          <input id="centerX" type="number" min="0" step="1" value="0" />
+
+      <div class="control-group">
+        <h2>Sources</h2>
+        <div class="inline-checks">
+          <label class="checkrow"><input id="starEnabled" type="checkbox" checked /> Star</label>
+          <label class="checkrow"><input id="planetEnabled" type="checkbox" checked /> Planet</label>
+          <label class="checkrow"><input id="specklesEnabled" type="checkbox" /> Speckles</label>
         </div>
-        <div class="param-row shape-control shape-center">
-          <label for="centerY">Center Y [px]</label>
-          <input id="centerY" type="number" min="0" step="1" value="0" />
+        <div class="control-grid">
+          <div class="field">
+            <label for="planetX">Planet X [lambda/D]</label>
+            <input id="planetX" type="number" step="0.1" value="4.0" />
+          </div>
+          <div class="field">
+            <label for="planetY">Planet Y [lambda/D]</label>
+            <input id="planetY" type="number" step="0.1" value="0.0" />
+          </div>
+          <div class="field">
+            <label for="targetSpeckle">Target speckle</label>
+            <select id="targetSpeckle"></select>
+          </div>
+          <div class="field">
+            <label for="starPlanetRatio">Star / planet</label>
+            <input id="starPlanetRatio" type="number" min="1e-12" step="1" value="500" />
+          </div>
+          <div class="field">
+            <label for="starSpeckleRatio">Star / speckle</label>
+            <input id="starSpeckleRatio" type="number" min="1e-12" step="1" value="100" />
+          </div>
+          <label class="checkrow full"><input id="matchPhaseZeroPower" type="checkbox" /> Match phase-0 coherent and incoherent power</label>
+          <div class="field">
+            <label>Speckles used</label>
+            <div id="speckleSelector" class="axis-note">Speckle list loads with the SLM grid.</div>
+          </div>
         </div>
-        <div class="param-row shape-control shape-circle">
-          <label for="radiusPx">Circle radius [px]</label>
-          <input id="radiusPx" type="number" min="0" step="1" value="30" />
+        <div class="source-geometry">
+          <div class="param-card-title">Edit speckle positions</div>
+          <div id="speckleEditor"></div>
+          <div class="button-grid">
+            <button id="addSpeckleBtn">Add Speckle</button>
+            <button id="updateSourcesBtn">Update Sources</button>
+          </div>
         </div>
-        <div class="param-row shape-control shape-ring">
-          <label for="innerRadiusPx">Inner radius [px]</label>
-          <input id="innerRadiusPx" type="number" min="0" step="1" value="20" />
+      </div>
+
+      <div class="control-group">
+        <h2>Mask</h2>
+        <div class="field">
+          <label for="tool">Shape</label>
+          <select id="tool">
+            <option value="freehand">Freehand pixels</option>
+            <option value="circle">Circle</option>
+            <option value="ring">Ring / Annulus</option>
+          </select>
         </div>
-        <div class="param-row shape-control shape-ring">
-          <label for="outerRadiusPx">Outer radius [px]</label>
-          <input id="outerRadiusPx" type="number" min="1" step="1" value="40" />
+        <div class="param-card" id="shapeParams">
+          <div class="param-card-title">Shape parameters</div>
+          <div class="param-row shape-control shape-center">
+            <label for="centerX">Center X [px]</label>
+            <input id="centerX" type="number" min="0" step="1" value="0" />
+          </div>
+          <div class="param-row shape-control shape-center">
+            <label for="centerY">Center Y [px]</label>
+            <input id="centerY" type="number" min="0" step="1" value="0" />
+          </div>
+          <div class="param-row shape-control shape-circle">
+            <label for="radiusPx">Radius [px]</label>
+            <input id="radiusPx" type="number" min="0" step="1" value="30" />
+          </div>
+          <div class="param-row shape-control shape-ring">
+            <label for="innerRadiusPx">Inner [px]</label>
+            <input id="innerRadiusPx" type="number" min="0" step="1" value="20" />
+          </div>
+          <div class="param-row shape-control shape-ring">
+            <label for="outerRadiusPx">Outer [px]</label>
+            <input id="outerRadiusPx" type="number" min="1" step="1" value="40" />
+          </div>
+          <div class="button-grid shape-control shape-center">
+            <button id="addRegionBtn">Add Region</button>
+            <button id="replaceRegionBtn">Replace Mask</button>
+          </div>
+          <div class="axis-note" id="shapeHelp"></div>
         </div>
-        <div class="button-grid shape-control shape-center">
-          <button id="addRegionBtn">Add Region</button>
-          <button id="replaceRegionBtn">Replace Mask</button>
+        <div class="button-grid three">
+          <button id="clearBtn">Clear</button>
+          <button id="undoBtn">Undo</button>
+          <button id="loadMaskBtn">Load Mask</button>
+          <button id="saveMaskBtn">Save Mask</button>
         </div>
-        <div class="axis-note" id="shapeHelp"></div>
       </div>
-      <div class="field">
-        <label for="phaseModulationRad">Phase modulation [rad]</label>
-        <input id="phaseModulationRad" type="number" step="0.01" value="3.141592653589793" />
-        <div class="axis-note">Applied inside the selected red pixels; zero outside.</div>
+
+      <div class="control-group">
+        <h2>Phase sweep</h2>
+        <div class="control-grid">
+          <div class="field">
+            <label for="phaseSteps">Steps</label>
+            <input id="phaseSteps" type="number" min="2" step="1" value="4" />
+          </div>
+          <div class="field">
+            <label for="phaseStartRad">Start [rad]</label>
+            <input id="phaseStartRad" type="number" step="0.01" value="0" />
+          </div>
+          <div class="field full">
+            <label for="phaseSpanRad">Span [rad]</label>
+            <input id="phaseSpanRad" type="number" step="0.01" value="6.283185307179586" />
+            <div class="axis-note">Full cycle. Endpoint is not duplicated.</div>
+          </div>
+        </div>
       </div>
-      <div class="field">
-        <label for="referenceSubtractPercent">Reference subtraction [%]</label>
-        <input id="referenceSubtractPercent" type="number" min="0" step="1" value="100" />
+
+      <div class="control-group">
+        <h2>Optimization</h2>
+        <div class="control-grid">
+          <div class="field">
+            <label for="searchRadiusPx">Search radius [px]</label>
+            <input id="searchRadiusPx" type="number" min="1" step="1" value="24" />
+          </div>
+          <div class="field">
+            <label for="optIterations">Candidates</label>
+            <input id="optIterations" type="number" min="1" step="1" value="12" />
+          </div>
+          <div class="field">
+            <label for="groupSizePx">Pixel group [px]</label>
+            <input id="groupSizePx" type="number" min="1" step="1" value="4" />
+          </div>
+          <div class="field">
+            <label for="planetPenalty">Penalty</label>
+            <input id="planetPenalty" type="number" min="0" step="0.1" value="1" />
+          </div>
+        </div>
+        <button class="primary" id="optimizeMaskBtn" style="width:100%;">Start optimization</button>
+        <div class="axis-note">Circle masks optimize radius. Other masks use pixel groups. Ratio score selects the best candidate.</div>
       </div>
-      <div class="field">
-        <label for="phaseSteps">Phase steps</label>
-        <input id="phaseSteps" type="number" min="2" step="1" value="4" />
+
+      <div class="control-group">
+        <h2>Results</h2>
+        <div class="button-grid">
+          <button id="saveResultBtn">Save results</button>
+          <button id="saveLogBtn">Save log</button>
+        </div>
       </div>
-      <div class="field">
-        <label for="subtractionMode">Subtraction model</label>
-        <select id="subtractionMode">
-          <option value="field">Electric field subtraction</option>
-          <option value="intensity">Intensity subtraction</option>
-        </select>
-      </div>
-      <div class="button-grid">
-        <button class="primary" id="applyBtn">Apply</button>
-        <button class="primary" id="evaluateModulationBtn">Evaluate modulation</button>
-        <button id="clearBtn">Clear</button>
-        <button id="undoBtn">Undo</button>
-        <button id="saveMaskBtn">Save Mask</button>
-        <button id="loadMaskBtn">Load Mask</button>
-        <button id="saveResultBtn">Save Result</button>
-        <button id="saveLogBtn">Save Log</button>
-      </div>
+
+      <details class="advanced">
+        <summary>Advanced settings</summary>
+        <div class="advanced-body">
+          <div class="field">
+            <label for="phaseModulationRad">Single phase [rad]</label>
+            <input id="phaseModulationRad" type="number" step="0.01" value="3.141592653589793" />
+          </div>
+          <div class="field">
+            <label for="referenceSubtractPercent">Reference subtraction [%]</label>
+            <input id="referenceSubtractPercent" type="number" min="0" step="1" value="100" />
+          </div>
+          <div class="field">
+            <label for="subtractionMode">Subtraction model</label>
+            <select id="subtractionMode">
+              <option value="field">Electric field subtraction</option>
+              <option value="intensity">Intensity subtraction</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="displayMode">Lyot map quantity</label>
+            <select id="displayMode">
+              <option value="abs">abs(Delta E_L)</option>
+              <option value="phase">phase(Delta E_L)</option>
+              <option value="real">real(Delta E_L)</option>
+              <option value="imag">imag(Delta E_L)</option>
+            </select>
+          </div>
+          <div class="button-grid">
+            <button id="applyBtn">Apply single phase</button>
+            <button id="evaluateModulationBtn">Evaluate current mask</button>
+          </div>
+        </div>
+      </details>
       <input id="maskFile" type="file" accept=".json" hidden />
-      <h2 style="margin-top:16px;">Display</h2>
-      <div class="field">
-        <label for="displayMode">Lyot map quantity</label>
-        <select id="displayMode">
-          <option value="abs">abs(Delta E_L)</option>
-          <option value="phase">phase(Delta E_L)</option>
-          <option value="real">real(Delta E_L)</option>
-          <option value="imag">imag(Delta E_L)</option>
-        </select>
-      </div>
-      <div id="status" class="status"></div>
     </section>
 
     <section class="panel canvas-card">
@@ -377,6 +546,8 @@ HTML = r"""<!doctype html>
       </div>
       <div class="legend">
         <div><span class="swatch" style="background:#d7191c"></span>pi SLM pixels</div>
+        <div><span class="swatch" style="background:#168245"></span>speckle placement</div>
+        <div><span class="swatch" style="background:#1d70b8"></span>planet placement</div>
         <div><span class="swatch" style="background:#c28a00"></span>star</div>
         <div><span class="swatch" style="background:#00a5b8"></span>planet</div>
         <div><span class="swatch" style="background:#b24bbd"></span>coherent speckles</div>
@@ -384,7 +555,13 @@ HTML = r"""<!doctype html>
       <div class="axis-note">SLM coordinates are focal-plane lambda/D. The source markers show where each source PSF is centered on this focal grid.</div>
     </section>
 
-    <section class="panel right">
+    <section class="panel right plots-panel">
+      <h2>Results</h2>
+      <div id="comparisonSummary" class="comparison-summary">
+        <div class="metric"><span>Speckle peak-to-peak modulation</span><strong>--</strong></div>
+        <div class="metric"><span>Planet peak-to-peak modulation</span><strong>--</strong></div>
+        <div class="metric"><span>Modulation ratio</span><strong>--</strong></div>
+      </div>
       <h2>Lyot-plane response</h2>
       <div class="map-grid">
         <div class="map"><div class="map-title">Star</div><div class="map-canvas"><canvas id="starMap"></canvas></div></div>
@@ -393,8 +570,20 @@ HTML = r"""<!doctype html>
         <div class="map"><div class="map-title">Coherent star + speckles</div><div class="map-canvas"><canvas id="coherentMap"></canvas></div></div>
         <div class="map"><div class="map-title">Incoherent star + planet amplitude</div><div class="map-canvas"><canvas id="incoherentMap"></canvas></div></div>
       </div>
-      <div class="map-title">Integrated Lyot-stop power versus modulation phase</div>
+      <div class="map-title">Current mask response, integrated Lyot-stop power</div>
       <div class="plot-canvas"><canvas id="phasePlot"></canvas></div>
+      <div class="map-grid">
+        <div>
+          <div class="map-title">Speckle-position sweep: power vs phase [rad]</div>
+          <div class="plot-canvas short"><canvas id="speckleSweepPlot"></canvas></div>
+        </div>
+        <div>
+          <div class="map-title">Planet-position sweep: power vs phase [rad]</div>
+          <div class="plot-canvas short"><canvas id="planetSweepPlot"></canvas></div>
+        </div>
+      </div>
+      <div class="map-title">Optimization trade-off</div>
+      <div class="plot-canvas short"><canvas id="tradeoffPlot"></canvas></div>
       <div id="metrics" class="results"></div>
     </section>
   </main>
@@ -411,6 +600,11 @@ HTML = r"""<!doctype html>
       lastPixel: null,
       lastResult: null,
       lastSweep: null,
+      lastComparison: null,
+      lastComparisonSignature: null,
+      lastOptimization: null,
+      placedMasks: null,
+      pollTimer: null,
     };
 
     const els = {
@@ -420,6 +614,12 @@ HTML = r"""<!doctype html>
       displayMode: document.getElementById("displayMode"),
       applyBtn: document.getElementById("applyBtn"),
       evaluateModulationBtn: document.getElementById("evaluateModulationBtn"),
+      runSpeckleSweepBtn: document.getElementById("runSpeckleSweepBtn"),
+      runPlanetSweepBtn: document.getElementById("runPlanetSweepBtn"),
+      runComparisonBtn: document.getElementById("runComparisonBtn"),
+      optimizeMaskBtn: document.getElementById("optimizeMaskBtn"),
+      stopBtn: document.getElementById("stopBtn"),
+      resetPhaseBtn: document.getElementById("resetPhaseBtn"),
       clearBtn: document.getElementById("clearBtn"),
       undoBtn: document.getElementById("undoBtn"),
       saveMaskBtn: document.getElementById("saveMaskBtn"),
@@ -436,8 +636,16 @@ HTML = r"""<!doctype html>
       phaseModulationRad: document.getElementById("phaseModulationRad"),
       referenceSubtractPercent: document.getElementById("referenceSubtractPercent"),
       phaseSteps: document.getElementById("phaseSteps"),
+      phaseStartRad: document.getElementById("phaseStartRad"),
+      phaseSpanRad: document.getElementById("phaseSpanRad"),
       subtractionMode: document.getElementById("subtractionMode"),
       speckleSelector: document.getElementById("speckleSelector"),
+      targetSpeckle: document.getElementById("targetSpeckle"),
+      searchRadiusPx: document.getElementById("searchRadiusPx"),
+      groupSizePx: document.getElementById("groupSizePx"),
+      optIterations: document.getElementById("optIterations"),
+      planetPenalty: document.getElementById("planetPenalty"),
+      matchPhaseZeroPower: document.getElementById("matchPhaseZeroPower"),
       maskFile: document.getElementById("maskFile"),
       shapeParams: document.getElementById("shapeParams"),
       shapeHelp: document.getElementById("shapeHelp"),
@@ -447,7 +655,11 @@ HTML = r"""<!doctype html>
       innerRadiusPx: document.getElementById("innerRadiusPx"),
       outerRadiusPx: document.getElementById("outerRadiusPx"),
       metrics: document.getElementById("metrics"),
+      comparisonSummary: document.getElementById("comparisonSummary"),
       phasePlot: document.getElementById("phasePlot"),
+      speckleSweepPlot: document.getElementById("speckleSweepPlot"),
+      planetSweepPlot: document.getElementById("planetSweepPlot"),
+      tradeoffPlot: document.getElementById("tradeoffPlot"),
       maps: {
         star: document.getElementById("starMap"),
         planet: document.getElementById("planetMap"),
@@ -510,6 +722,7 @@ HTML = r"""<!doctype html>
     function commitCurrentMaskAsBase() {
       state.baseMask = state.mask ? state.mask.slice() : new Uint8Array(state.config.n_fft * state.config.n_fft);
       state.previewMask = null;
+      markResultsOutdated();
     }
 
     function drawCirclePixels(start, end) {
@@ -600,6 +813,7 @@ HTML = r"""<!doctype html>
       }
       state.mask = composed;
       redrawSlm();
+      markResultsOutdated();
     }
 
     function applyParameterizedShape() {
@@ -683,8 +897,13 @@ HTML = r"""<!doctype html>
     function renderSpeckleSelector() {
       const markers = speckleMarkers();
       els.speckleSelector.innerHTML = "";
+      els.targetSpeckle.innerHTML = "";
       if (!markers.length) {
         els.speckleSelector.textContent = "No coherent speckles are configured.";
+        const option = document.createElement("option");
+        option.value = "0";
+        option.textContent = "No speckles";
+        els.targetSpeckle.appendChild(option);
         return;
       }
       for (const marker of markers) {
@@ -701,6 +920,10 @@ HTML = r"""<!doctype html>
         row.appendChild(checkbox);
         row.appendChild(text);
         els.speckleSelector.appendChild(row);
+        const option = document.createElement("option");
+        option.value = String(marker.index);
+        option.textContent = `${marker.label}: (${marker.x.toFixed(2)}, ${marker.y.toFixed(2)})`;
+        els.targetSpeckle.appendChild(option);
       }
     }
 
@@ -775,6 +998,11 @@ HTML = r"""<!doctype html>
         renderSourceGeometryControls();
         redrawSlm();
         state.lastResult = null;
+        state.lastComparison = null;
+        state.lastComparisonSignature = null;
+        state.lastOptimization = null;
+        state.placedMasks = null;
+        renderComparisonSummary(null, "Settings changed. Run comparison again.");
         setStatus("Source locations updated. Press Apply to propagate.");
       } catch (err) {
         setStatus(String(err.message || err));
@@ -913,18 +1141,56 @@ HTML = r"""<!doctype html>
 
       for (const marker of state.config.source_markers) drawMarker(ctx, marker);
 
+      if (state.placedMasks) {
+        const overlays = [
+          {key: "speckle_position", color: "rgba(22,130,69,0.42)"},
+          {key: "planet_position", color: "rgba(29,112,184,0.36)"},
+        ];
+        for (const overlay of overlays) {
+          const mask = state.placedMasks[overlay.key];
+          if (!mask) continue;
+          ctx.fillStyle = overlay.color;
+          for (let y = 0; y < n; y++) {
+            const row = y * n;
+            for (let x = 0; x < n; x++) {
+              if (mask[row + x]) {
+                const px = x * cellW;
+                const py = els.slm.height - (y + 1) * cellH;
+                ctx.fillRect(px, py, Math.max(1, cellW), Math.max(1, cellH));
+              }
+            }
+          }
+        }
+      }
+
       ctx.fillStyle = "#18202a";
       ctx.font = `${Math.max(12, Math.round(els.slm.width / 48))}px system-ui`;
-      ctx.fillText(`selected: ${maskCount()} px`, 10, 22);
+      const selectedText = `selected: ${maskCount()} px`;
+      const selectedWidth = ctx.measureText(selectedText).width + 12;
+      ctx.fillStyle = "rgba(255,255,255,0.76)";
+      ctx.fillRect(8, els.slm.height - 32, selectedWidth, 22);
+      ctx.fillStyle = "#18202a";
+      ctx.fillText(selectedText, 14, els.slm.height - 16);
+    }
+
+    function packMask(mask) {
+      let s = "";
+      const chunk = 32768;
+      for (let i = 0; i < mask.length; i += chunk) {
+        s += String.fromCharCode(...mask.subarray(i, i + chunk));
+      }
+      return btoa(s);
     }
 
     function unpackBase64Mask() {
-      let s = "";
-      const chunk = 32768;
-      for (let i = 0; i < state.mask.length; i += chunk) {
-        s += String.fromCharCode(...state.mask.subarray(i, i + chunk));
-      }
-      return btoa(s);
+      return packMask(state.mask);
+    }
+
+    function decodeMaskB64(maskB64) {
+      const raw = atob(maskB64 || "");
+      const next = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) next[i] = raw.charCodeAt(i);
+      return next;
     }
 
     function valueToColor(value, vmin, vmax, mode) {
@@ -1200,17 +1466,22 @@ HTML = r"""<!doctype html>
       }
     }
 
+    function formatRatio(value) {
+      if (value === undefined) return "--";
+      return value === null ? "undefined" : Number(value).toExponential(6);
+    }
+
     function renderSweepMetrics(sweep) {
       els.metrics.innerHTML = "";
       const ratios = sweep.metrics.ratios || {};
-      for (const [key, label] of [["R_mod_harmonic", "R_mod harmonic"], ["R_mod_pp", "R_mod peak-to-peak"]]) {
+      for (const [key, label] of [["R_response_harmonic", "R_response harmonic"], ["R_response_pp", "R_response peak-to-peak"]]) {
         if (!(key in ratios)) continue;
         const div = document.createElement("div");
         div.className = "metric";
-        div.innerHTML = `<span>${label}</span><strong>${Number(ratios[key]).toExponential(6)}</strong>`;
+        div.innerHTML = `<span>${label}</span><strong>${formatRatio(ratios[key])}</strong>`;
         els.metrics.appendChild(div);
       }
-      for (const name of ["coherent", "incoherent", "star", "speckle", "planet"]) {
+      for (const name of ["speckle_response", "planet_response", "coherent", "incoherent", "star", "speckle", "planet"]) {
         const item = sweep.metrics[name];
         if (!item) continue;
         const div = document.createElement("div");
@@ -1218,6 +1489,137 @@ HTML = r"""<!doctype html>
         div.innerHTML = `<span>${name}</span><strong>M_pp ${Number(item.M_pp).toExponential(3)}<br>M_rms ${Number(item.M_rms).toExponential(3)}<br>M_harmonic ${Number(item.M_harmonic).toExponential(3)}<br>phase ${Number(item.phase_response).toFixed(3)}</strong>`;
         els.metrics.appendChild(div);
       }
+    }
+
+    function renderComparisonSummary(comparison, note) {
+      const m = comparison && comparison.metrics ? comparison.metrics : {};
+      const rows = [
+        ["Speckle peak-to-peak modulation", m.main_speckle_pp],
+        ["Planet peak-to-peak modulation", m.main_planet_pp],
+        ["Modulation ratio", m.ratio_pp],
+      ];
+      els.comparisonSummary.innerHTML = "";
+      for (const [label, value] of rows) {
+        const div = document.createElement("div");
+        div.className = "metric";
+        const nearZero = label === "Modulation ratio" && m.ratio_denominator_near_zero;
+        const suffix = nearZero ? "<br>denominator near zero" : "";
+        div.innerHTML = `<span>${label}</span><strong>${formatRatio(value)}${suffix}</strong>`;
+        els.comparisonSummary.appendChild(div);
+      }
+      if (note) {
+        const div = document.createElement("div");
+        div.className = "metric";
+        div.style.gridColumn = "1 / -1";
+        div.innerHTML = `<span>Status</span><strong>${note}</strong>`;
+        els.comparisonSummary.appendChild(div);
+      }
+    }
+
+    function renderComparisonMetrics(comparison) {
+      els.metrics.innerHTML = "";
+      const complete = comparison.metrics && comparison.metrics.complete;
+      const sig = currentComparisonSignature();
+      const outdated = state.lastComparisonSignature && sig !== state.lastComparisonSignature;
+      renderComparisonSummary(
+        comparison,
+        !complete ? "Incomplete result" : (outdated ? "Settings changed after this result" : "")
+      );
+      const m = comparison.metrics || {};
+      const rows = [
+        ["speckle_run_planet_pp", "Planet pp, speckle mask"],
+        ["planet_run_speckle_pp", "Speckle pp, planet mask"],
+        ["main_planet_mean", "Mean planet power"],
+      ];
+      for (const [key, label] of rows) {
+        if (!(key in m)) continue;
+        const div = document.createElement("div");
+        div.className = "metric";
+        const suffix = key === "ratio_pp" && m.ratio_denominator_near_zero ? "<br>denominator near zero" : "";
+        div.innerHTML = `<span>${label}</span><strong>${formatRatio(m[key])}${suffix}</strong>`;
+        els.metrics.appendChild(div);
+      }
+      for (const [runKey, label] of [["speckle_position", "Speckle-position run"], ["planet_position", "Planet-position run"]]) {
+        const sweep = comparison.sweeps && comparison.sweeps[runKey];
+        if (!sweep) continue;
+        for (const responseName of ["speckle_response", "planet_response"]) {
+          const item = sweep.metrics[responseName];
+          const div = document.createElement("div");
+          div.className = "metric";
+          div.innerHTML = `<span>${label}: ${responseName}</span><strong>mean ${Number(item.P_mean).toExponential(3)}<br>pp ${Number(item.M_pp).toExponential(3)}<br>harm ${Number(item.M_harmonic).toExponential(3)}</strong>`;
+          els.metrics.appendChild(div);
+        }
+      }
+      if (comparison.phase_zero_match) {
+        const div = document.createElement("div");
+        div.className = "metric";
+        div.innerHTML = `<span>Phase-0 match star / speckle</span><strong>${Number(comparison.phase_zero_match.star_speckle_ratio).toExponential(6)}</strong>`;
+        els.metrics.appendChild(div);
+      }
+    }
+
+    function currentComparisonSignature() {
+      if (!state.mask || !state.config) return "";
+      const payload = commonSweepPayload();
+      return JSON.stringify(payload);
+    }
+
+    function markResultsOutdated() {
+      if (!state.lastComparison) return;
+      renderComparisonMetrics(state.lastComparison);
+      setStatus("Settings changed. Existing comparison may be outdated.");
+    }
+
+    function drawTradeoffPlot(optimization) {
+      resizeCanvas(els.tradeoffPlot);
+      const canvas = els.tradeoffPlot;
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (!optimization || !optimization.history || !optimization.history.length) return;
+      const points = optimization.history;
+      let xmax = 0, ymax = 0;
+      for (const p of points) {
+        xmax = Math.max(xmax, Number(p.planet_pp) || 0);
+        ymax = Math.max(ymax, Number(p.speckle_pp) || 0);
+      }
+      xmax = xmax || 1;
+      ymax = ymax || 1;
+      const margin = {left: 56, right: 16, top: 18, bottom: 38};
+      const w = canvas.width - margin.left - margin.right;
+      const h = canvas.height - margin.top - margin.bottom;
+      ctx.strokeStyle = "rgba(24,32,42,0.18)";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const x = margin.left + (i / 4) * w;
+        const y = margin.top + (i / 4) * h;
+        ctx.beginPath(); ctx.moveTo(x, margin.top); ctx.lineTo(x, margin.top + h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + w, y); ctx.stroke();
+      }
+      ctx.strokeStyle = "#18202a";
+      ctx.beginPath();
+      ctx.moveTo(margin.left, margin.top);
+      ctx.lineTo(margin.left, margin.top + h);
+      ctx.lineTo(margin.left + w, margin.top + h);
+      ctx.stroke();
+      const pareto = new Set(optimization.pareto_indices || []);
+      points.forEach((p, idx) => {
+        const x = margin.left + ((Number(p.planet_pp) || 0) / xmax) * w;
+        const y = margin.top + (1 - ((Number(p.speckle_pp) || 0) / ymax)) * h;
+        ctx.fillStyle = idx === optimization.best_index ? "#d7191c" : (pareto.has(idx) ? "#168245" : "#1d70b8");
+        ctx.beginPath();
+        ctx.arc(x, y, idx === optimization.best_index ? 6 : 4, 0, 2 * Math.PI);
+        ctx.fill();
+      });
+      ctx.fillStyle = "#5b6673";
+      ctx.font = `${Math.max(11, Math.round(canvas.width / 62))}px system-ui`;
+      ctx.fillText("planet pp", margin.left + w / 2 - 28, canvas.height - 11);
+      ctx.save();
+      ctx.translate(14, margin.top + h / 2 + 34);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText("speckle pp", 0, 0);
+      ctx.restore();
     }
 
     async function applyMask() {
@@ -1234,6 +1636,7 @@ HTML = r"""<!doctype html>
             include_speckles: document.getElementById("specklesEnabled").checked,
             selected_speckle_indices: selectedSpeckleIndices(),
             star_planet_ratio: Number(document.getElementById("starPlanetRatio").value),
+            star_speckle_ratio: Number(document.getElementById("starSpeckleRatio").value),
             phase_modulation_rad: Number(els.phaseModulationRad.value),
             lyot_reference_scale: Number(els.referenceSubtractPercent.value) / 100,
             display_mode: document.getElementById("displayMode").value
@@ -1264,12 +1667,15 @@ HTML = r"""<!doctype html>
           body: JSON.stringify({
             mask_b64: unpackBase64Mask(),
             phase_steps: Number(els.phaseSteps.value),
+            phase_start_rad: Number(els.phaseStartRad.value),
+            phase_span_rad: Number(els.phaseSpanRad.value),
             subtraction_mode: els.subtractionMode.value,
             include_star: document.getElementById("starEnabled").checked,
             include_planet: document.getElementById("planetEnabled").checked,
             include_speckles: document.getElementById("specklesEnabled").checked,
             selected_speckle_indices: selectedSpeckleIndices(),
             star_planet_ratio: Number(document.getElementById("starPlanetRatio").value),
+            star_speckle_ratio: Number(document.getElementById("starSpeckleRatio").value),
             lyot_reference_scale: Number(els.referenceSubtractPercent.value) / 100
           })
         });
@@ -1290,6 +1696,191 @@ HTML = r"""<!doctype html>
       } finally {
         els.evaluateModulationBtn.disabled = false;
       }
+    }
+
+    function commonSweepPayload() {
+      return {
+        mask_b64: unpackBase64Mask(),
+        selected_speckle_index: Number(els.targetSpeckle.value || 0),
+        phase_steps: Number(els.phaseSteps.value),
+        phase_start_rad: Number(els.phaseStartRad.value),
+        phase_span_rad: Number(els.phaseSpanRad.value),
+        subtraction_mode: els.subtractionMode.value,
+        include_star: document.getElementById("starEnabled").checked,
+        include_planet: document.getElementById("planetEnabled").checked,
+        include_speckles: document.getElementById("specklesEnabled").checked,
+        star_planet_ratio: Number(document.getElementById("starPlanetRatio").value),
+        star_speckle_ratio: Number(document.getElementById("starSpeckleRatio").value),
+        match_phase_zero_power: els.matchPhaseZeroPower.checked,
+        lyot_reference_scale: Number(els.referenceSubtractPercent.value) / 100
+      };
+    }
+
+    async function runComparison(mode) {
+      const labels = {speckle: "Running speckle-position sweep...", planet: "Running planet-position sweep...", both: "Running comparison..."};
+      setStatus(labels[mode] || "Running comparison...");
+      setBusy(true);
+      try {
+        const signature = currentComparisonSignature();
+        const response = await fetch("/api/comparison", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(Object.assign(commonSweepPayload(), {mode}))
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Comparison failed");
+        state.lastComparison = data;
+        state.lastComparisonSignature = signature;
+        state.lastSweep = null;
+        state.placedMasks = {
+          speckle_position: decodeMaskB64(data.placed_masks.speckle_position),
+          planet_position: decodeMaskB64(data.placed_masks.planet_position),
+        };
+        redrawSlm();
+        drawPhasePlot(null);
+        drawPhasePlotOn(els.speckleSweepPlot, data.sweeps.speckle_position || null);
+        drawPhasePlotOn(els.planetSweepPlot, data.sweeps.planet_position || null);
+        renderComparisonMetrics(data);
+        const complete = data.metrics && data.metrics.complete;
+        setStatus(complete ? "Comparison complete. Main metric is peak-to-peak modulation." : "Run stopped. Completed results are kept.");
+      } catch (err) {
+        setStatus(String(err.message || err));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function drawPhasePlotOn(canvas, sweep) {
+      const previous = els.phasePlot;
+      els.phasePlot = canvas;
+      try {
+        drawPhasePlot(sweep);
+      } finally {
+        els.phasePlot = previous;
+      }
+    }
+
+    async function optimizeMask() {
+      setStatus("Optimizing mask...");
+      setBusy(true);
+      try {
+        const response = await fetch("/api/optimize", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(Object.assign(commonSweepPayload(), {
+            optimization_mode: els.tool.value === "circle" ? "circle_size" : "pixel_groups",
+            circle_center_x: Number(els.centerX.value),
+            circle_center_y: Number(els.centerY.value),
+            circle_radius_px: Number(els.radiusPx.value),
+            search_radius_px: Number(els.searchRadiusPx.value),
+            group_size_px: Number(els.groupSizePx.value),
+            iterations: Number(els.optIterations.value),
+            planet_penalty: Number(els.planetPenalty.value)
+          }))
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Optimization failed");
+        state.lastOptimization = data;
+        drawTradeoffPlot(data);
+        if (data.best_mask_b64) {
+          state.undo.push(state.mask.slice());
+          state.mask = decodeMaskB64(data.best_mask_b64);
+          commitCurrentMaskAsBase();
+          redrawSlm();
+        }
+        renderOptimizationMetrics(data);
+        setStatus(data.stopped ? "Optimization stopped. Completed candidates are kept." : "Optimization complete. Best mask was applied to the editor.");
+      } catch (err) {
+        setStatus(String(err.message || err));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderOptimizationMetrics(opt) {
+      els.metrics.innerHTML = "";
+      const best = opt.best_index === null || opt.best_index === undefined ? null : opt.history[opt.best_index];
+      const rows = best ? [
+        ["Mode", opt.optimization_mode || "pixel_groups"],
+        ["Best candidate", best.name],
+        ["Best score", Number(best.score).toExponential(6)],
+        ["Speckle pp", Number(best.speckle_pp).toExponential(6)],
+        ["Planet pp", Number(best.planet_pp).toExponential(6)],
+        ["Ratio pp", formatRatio(best.ratio_pp)],
+        ["Pareto candidates", String((opt.pareto_indices || []).length)],
+      ] : [["Best candidate", "none"]];
+      if (opt.phase_zero_match) {
+        rows.push(["Matched star / speckle", Number(opt.phase_zero_match.star_speckle_ratio).toExponential(6)]);
+      }
+      for (const [label, value] of rows) {
+        const div = document.createElement("div");
+        div.className = "metric";
+        div.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
+        els.metrics.appendChild(div);
+      }
+      for (const item of opt.history || []) {
+        const div = document.createElement("div");
+        div.className = "metric";
+        div.innerHTML = `<span>${item.name}</span><strong>score ${Number(item.score).toExponential(2)}<br>speckle ${Number(item.speckle_pp).toExponential(2)}<br>planet ${Number(item.planet_pp).toExponential(2)}</strong>`;
+        els.metrics.appendChild(div);
+      }
+    }
+
+    function setBusy(isBusy) {
+      for (const button of [
+        els.applyBtn, els.evaluateModulationBtn, els.runSpeckleSweepBtn,
+        els.runPlanetSweepBtn, els.runComparisonBtn, els.optimizeMaskBtn,
+        els.clearBtn, els.undoBtn, els.saveMaskBtn, els.loadMaskBtn,
+        els.saveResultBtn, els.saveLogBtn, els.addRegionBtn, els.replaceRegionBtn
+      ]) {
+        button.disabled = Boolean(isBusy);
+      }
+      els.stopBtn.disabled = !isBusy;
+      if (isBusy) startStatusPolling();
+      else stopStatusPolling();
+    }
+
+    function startStatusPolling() {
+      stopStatusPolling();
+      state.pollTimer = window.setInterval(async () => {
+        try {
+          const response = await fetch("/api/status", {method: "POST"});
+          const data = await response.json();
+          if (!response.ok) return;
+          const active = data.active_run || "running";
+          const parts = [`Active run: ${active}`];
+          if (data.phase_index && data.phase_count) {
+            parts.push(`phase ${data.phase_index}/${data.phase_count}`);
+          }
+          if (data.candidate && data.candidate_count) {
+            parts.push(`candidate ${data.candidate}/${data.candidate_count}`);
+          }
+          if (data.phase_rad !== undefined) {
+            parts.push(`phase ${Number(data.phase_rad).toFixed(3)} rad`);
+          }
+          setStatus(parts.join(", "));
+        } catch (_err) {
+          return;
+        }
+      }, 1000);
+    }
+
+    function stopStatusPolling() {
+      if (state.pollTimer !== null) {
+        window.clearInterval(state.pollTimer);
+        state.pollTimer = null;
+      }
+    }
+
+    async function stopActiveRun() {
+      const response = await fetch("/api/stop", {method: "POST"});
+      const data = await response.json();
+      setStatus(data.status || "Stop requested.");
+    }
+
+    function resetPhase() {
+      els.phaseModulationRad.value = "0";
+      setStatus("Phase set to zero for the next single propagation.");
     }
 
     function downloadText(filename, text) {
@@ -1322,14 +1913,20 @@ HTML = r"""<!doctype html>
           include_speckles: document.getElementById("specklesEnabled").checked,
           selected_speckle_indices: selectedSpeckleIndices(),
           star_planet_ratio: Number(document.getElementById("starPlanetRatio").value),
+          star_speckle_ratio: Number(document.getElementById("starSpeckleRatio").value),
+          match_phase_zero_power: els.matchPhaseZeroPower.checked,
           science_phase_modulation_rad: Number(els.phaseModulationRad.value),
           reference_subtraction_percent: Number(els.referenceSubtractPercent.value),
           phase_steps: Number(els.phaseSteps.value),
+          phase_start_rad: Number(els.phaseStartRad.value),
+          phase_span_rad: Number(els.phaseSpanRad.value),
           subtraction_mode: els.subtractionMode.value,
         },
         source_markers: state.config ? state.config.source_markers : [],
         single_phase_metrics: state.lastResult ? state.lastResult.metrics : null,
         phase_sweep: state.lastSweep,
+        comparison: state.lastComparison,
+        optimization: state.lastOptimization,
       };
     }
 
@@ -1360,13 +1957,20 @@ HTML = r"""<!doctype html>
     }
 
     async function saveResult() {
-      if (!state.lastResult) {
-        setStatus("No propagation result to save.");
-        return;
+      const payload = currentLogPayload();
+      payload.mask_b64 = unpackBase64Mask();
+      payload.placed_masks_b64 = state.placedMasks ? {
+        speckle_position: packMask(state.placedMasks.speckle_position),
+        planet_position: packMask(state.placedMasks.planet_position),
+      } : null;
+      downloadText("interactive_slm_optimization_results.json", JSON.stringify(payload, null, 2));
+      if (state.lastResult) {
+        const response = await fetch("/api/save-result", {method: "POST"});
+        const data = await response.json();
+        setStatus(data.path ? `Downloaded JSON and saved ${data.path}` : "Downloaded JSON results.");
+      } else {
+        setStatus("Downloaded JSON results.");
       }
-      const response = await fetch("/api/save-result", {method: "POST"});
-      const data = await response.json();
-      setStatus(data.path ? `Saved ${data.path}` : (data.error || "Save failed"));
     }
 
     function bindEvents() {
@@ -1425,6 +2029,12 @@ HTML = r"""<!doctype html>
       });
       els.applyBtn.addEventListener("click", applyMask);
       els.evaluateModulationBtn.addEventListener("click", evaluateModulation);
+      els.runSpeckleSweepBtn.addEventListener("click", () => runComparison("speckle"));
+      els.runPlanetSweepBtn.addEventListener("click", () => runComparison("planet"));
+      els.runComparisonBtn.addEventListener("click", () => runComparison("both"));
+      els.optimizeMaskBtn.addEventListener("click", optimizeMask);
+      els.stopBtn.addEventListener("click", stopActiveRun);
+      els.resetPhaseBtn.addEventListener("click", resetPhase);
       els.clearBtn.addEventListener("click", () => {
         state.undo.push(state.mask.slice());
         state.mask.fill(0);
@@ -1460,7 +2070,33 @@ HTML = r"""<!doctype html>
         input.addEventListener("keyup", applyParameterizedShape);
       }
       els.displayMode.addEventListener("change", redrawMaps);
-      window.addEventListener("resize", () => { redrawSlm(); redrawMaps(); drawPhasePlot(state.lastSweep); });
+      for (const input of [
+        document.getElementById("starEnabled"),
+        document.getElementById("planetEnabled"),
+        document.getElementById("specklesEnabled"),
+        document.getElementById("starPlanetRatio"),
+        document.getElementById("starSpeckleRatio"),
+        els.matchPhaseZeroPower,
+        els.targetSpeckle,
+        els.phaseSteps,
+        els.phaseStartRad,
+        els.phaseSpanRad,
+        els.referenceSubtractPercent,
+        els.subtractionMode,
+      ]) {
+        input.addEventListener("input", markResultsOutdated);
+        input.addEventListener("change", markResultsOutdated);
+      }
+      window.addEventListener("resize", () => {
+        redrawSlm();
+        redrawMaps();
+        drawPhasePlot(state.lastSweep);
+        if (state.lastComparison) {
+          drawPhasePlotOn(els.speckleSweepPlot, state.lastComparison.sweeps.speckle_position || null);
+          drawPhasePlotOn(els.planetSweepPlot, state.lastComparison.sweeps.planet_position || null);
+        }
+        drawTradeoffPlot(state.lastOptimization);
+      });
     }
 
     async function init() {
@@ -1476,6 +2112,11 @@ HTML = r"""<!doctype html>
       updateShapeParameterVisibility();
       redrawSlm();
       drawPhasePlot(null);
+      drawPhasePlotOn(els.speckleSweepPlot, null);
+      drawPhasePlotOn(els.planetSweepPlot, null);
+      drawTradeoffPlot(null);
+      renderComparisonSummary(null, "");
+      setBusy(false);
       setStatus(`Ready. SLM grid ${state.config.n_fft} x ${state.config.n_fft}.`);
     }
 
@@ -1500,7 +2141,11 @@ class _SLMHtmlServer:
     def __init__(self):
         self.calculator = SLMLyotResponseCalculator()
         self.last_result: dict | None = None
+        self.last_comparison: dict | None = None
+        self.last_optimization: dict | None = None
         self.last_save_path = Path("interactive_slm_lyot_response_html.npz")
+        self.stop_event = threading.Event()
+        self.progress: dict = {"active_run": "idle"}
         center = self.calculator.n_fft // 2
         half_width = max(2, int(round(0.75 * float(self.calculator.config.pupil_pixels))))
         row_slice = slice(max(0, center - half_width), min(self.calculator.n_fft, center + half_width + 1))
@@ -1585,6 +2230,27 @@ class _SLMHtmlServer:
             (self.calculator.n_fft, self.calculator.n_fft)
         ).astype(bool)
 
+    def encode_mask(self, mask: np.ndarray) -> str:
+        return base64.b64encode(np.asarray(mask, dtype=np.uint8).ravel().tobytes()).decode("ascii")
+
+    def _progress_callback(self, progress: dict) -> None:
+        self.progress = {str(key): value for key, value in progress.items()}
+
+    def _stop_requested(self) -> bool:
+        return self.stop_event.is_set()
+
+    def calibrated_star_speckle_ratio(self, payload: dict, selected_indices: object) -> tuple[float, dict | None]:
+        base_ratio = float(payload.get("star_speckle_ratio", 100.0))
+        if not bool(payload.get("match_phase_zero_power", False)):
+            return base_ratio, None
+        calibration = self.calculator.calibrate_star_speckle_ratio_for_phase_zero_match(
+            selected_speckle_indices=selected_indices,
+            star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+            lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
+            subtraction_mode=str(payload.get("subtraction_mode", "field")),
+        )
+        return float(calibration["star_speckle_ratio"]), calibration
+
     def map_payload(self, result: dict, mode: str) -> dict:
         maps = {}
         extent = self.config_payload()["lyot_extent"]
@@ -1624,11 +2290,16 @@ class _SLMHtmlServer:
         metrics = {}
         for name, values in sweep["metrics"].items():
             if isinstance(values, dict):
-                metrics[name] = {key: float(value) for key, value in values.items()}
+                metrics[name] = {
+                    key: None if value is None else float(value)
+                    for key, value in values.items()
+                }
             else:
-                metrics[name] = float(values)
+                metrics[name] = None if values is None else float(values)
         return {
             "phase_steps": int(sweep["phase_steps"]),
+            "phase_start_rad": float(sweep.get("phase_start_rad", 0.0)),
+            "phase_span_rad": float(sweep.get("phase_span_rad", 2.0 * np.pi)),
             "subtraction_mode": str(sweep["subtraction_mode"]),
             "lyot_reference_scale": float(sweep["lyot_reference_scale"]),
             "phases": np.asarray(sweep["phases"], dtype=float).tolist(),
@@ -1637,7 +2308,64 @@ class _SLMHtmlServer:
                 name: np.asarray(values, dtype=float).tolist()
                 for name, values in sweep["powers"].items()
             },
+            "responses": {
+                name: np.asarray(values, dtype=float).tolist()
+                for name, values in sweep.get("responses", {}).items()
+            },
             "metrics": metrics,
+            "phase_zero_match": sweep.get("phase_zero_match"),
+        }
+
+    def comparison_payload(
+        self,
+        comparison: dict,
+        *,
+        speckle_mask: np.ndarray,
+        planet_mask: np.ndarray,
+    ) -> dict:
+        return {
+            "measurement_plane": comparison["measurement_plane"],
+            "primary_metric": comparison["primary_metric"],
+            "metrics": comparison["metrics"],
+            "placements": comparison["placements"],
+            "phase_zero_match": comparison.get("phase_zero_match"),
+            "placed_masks": {
+                "speckle_position": self.encode_mask(speckle_mask),
+                "planet_position": self.encode_mask(planet_mask),
+            },
+            "sweeps": {
+                name: self.phase_sweep_payload(sweep)
+                for name, sweep in comparison["sweeps"].items()
+            },
+        }
+
+    def optimization_payload(self, optimization: dict) -> dict:
+        history = []
+        for item in optimization["history"]:
+            copied = {
+                key: value
+                for key, value in item.items()
+                if key not in {"mask", "comparison"}
+            }
+            history.append(copied)
+        best_index = optimization["best_index"]
+        best_mask_b64 = None
+        if best_index is not None and 0 <= best_index < len(optimization["history"]):
+            best_mask_b64 = self.encode_mask(optimization["history"][best_index]["mask"])
+        return {
+            "primary_metric": optimization["primary_metric"],
+            "optimization_mode": optimization.get("optimization_mode", "pixel_groups"),
+            "search_radius_px": optimization["search_radius_px"],
+            "group_size_px": optimization["group_size_px"],
+            "iterations": optimization["iterations"],
+            "planet_penalty": optimization["planet_penalty"],
+            "random_seed": optimization["random_seed"],
+            "phase_zero_match": optimization.get("phase_zero_match"),
+            "history": history,
+            "best_index": best_index,
+            "best_mask_b64": best_mask_b64,
+            "pareto_indices": optimization["pareto_indices"],
+            "stopped": optimization["stopped"],
         }
 
 
@@ -1701,19 +2429,153 @@ def make_handler(app: _SLMHtmlServer):
                     return
                 if path == "/api/phase-sweep":
                     mask = app.decode_mask(str(payload["mask_b64"]))
+                    selected_indices = payload.get("selected_speckle_indices")
+                    star_speckle_ratio, phase_zero_match = app.calibrated_star_speckle_ratio(
+                        payload,
+                        selected_indices,
+                    )
                     sweep = app.calculator.phase_sweep(
                         mask,
                         phase_steps=int(payload.get("phase_steps", 4)),
+                        phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
+                        phase_span_rad=float(payload.get("phase_span_rad", 2.0 * np.pi)),
                         subtraction_mode=str(payload.get("subtraction_mode", "field")),
                         include_star=bool(payload.get("include_star", True)),
                         include_planet=bool(payload.get("include_planet", True)),
                         include_speckles=bool(payload.get("include_speckles", False)),
-                        selected_speckle_indices=payload.get("selected_speckle_indices"),
+                        selected_speckle_indices=selected_indices,
                         star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
-                        star_speckle_ratio=float(payload.get("star_speckle_ratio", 100.0)),
+                        star_speckle_ratio=star_speckle_ratio,
+                        lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
+                        progress_callback=lambda update: app._progress_callback(
+                            {"active_run": "phase_sweep", **update}
+                        ),
+                    )
+                    sweep["phase_zero_match"] = phase_zero_match
+                    _json_response(self, 200, app.phase_sweep_payload(sweep))
+                    return
+                if path == "/api/comparison":
+                    app.stop_event.clear()
+                    template = app.decode_mask(str(payload["mask_b64"]))
+                    selected_index = int(payload.get("selected_speckle_index", 0))
+                    speckle_offsets = app.calculator._speckle_offsets()
+                    if not speckle_offsets:
+                        raise ValueError("At least one speckle is required.")
+                    star_speckle_ratio, phase_zero_match = app.calibrated_star_speckle_ratio(
+                        payload,
+                        (selected_index,),
+                    )
+                    speckle_placement = app.calculator.place_mask_template(
+                        template,
+                        speckle_offsets[selected_index],
+                    )
+                    planet_placement = app.calculator.place_mask_template(
+                        template,
+                        app.calculator.config.companion_offset_lamD,
+                    )
+                    mode = str(payload.get("mode", "both"))
+                    sweep_kwargs = dict(
+                        phase_steps=int(payload.get("phase_steps", 4)),
+                        phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
+                        phase_span_rad=float(payload.get("phase_span_rad", 2.0 * np.pi)),
+                        subtraction_mode=str(payload.get("subtraction_mode", "field")),
+                        include_star=bool(payload.get("include_star", True)),
+                        include_planet=bool(payload.get("include_planet", True)),
+                        include_speckles=bool(payload.get("include_speckles", True)),
+                        selected_speckle_indices=(selected_index,),
+                        star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+                        star_speckle_ratio=star_speckle_ratio,
                         lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
                     )
-                    _json_response(self, 200, app.phase_sweep_payload(sweep))
+                    sweeps = {}
+                    app._progress_callback({"active_run": "speckle", "completed_runs": 0, "total_runs": 2})
+                    if mode in {"speckle", "both"} and not app._stop_requested():
+                        sweeps["speckle_position"] = app.calculator.phase_sweep(
+                            speckle_placement["mask"],
+                            **sweep_kwargs,
+                            progress_callback=lambda update: app._progress_callback(
+                                {"active_run": "speckle", "completed_runs": 0, "total_runs": 2, **update}
+                            ),
+                        )
+                    app._progress_callback({"active_run": "planet", "completed_runs": len(sweeps), "total_runs": 2})
+                    if mode in {"planet", "both"} and not app._stop_requested():
+                        sweeps["planet_position"] = app.calculator.phase_sweep(
+                            planet_placement["mask"],
+                            **sweep_kwargs,
+                            progress_callback=lambda update: app._progress_callback(
+                                {"active_run": "planet", "completed_runs": len(sweeps), "total_runs": 2, **update}
+                            ),
+                        )
+                    app._progress_callback({"active_run": "idle", "completed_runs": len(sweeps), "total_runs": 2})
+                    comparison = app.calculator._comparison_result(
+                        sweeps,
+                        speckle_placement,
+                        planet_placement,
+                    )
+                    comparison["phase_zero_match"] = phase_zero_match
+                    app.last_comparison = comparison
+                    _json_response(
+                        self,
+                        200,
+                        app.comparison_payload(
+                            comparison,
+                            speckle_mask=speckle_placement["mask"],
+                            planet_mask=planet_placement["mask"],
+                        ),
+                    )
+                    return
+                if path == "/api/optimize":
+                    app.stop_event.clear()
+                    template = app.decode_mask(str(payload["mask_b64"]))
+                    selected_index = int(payload.get("selected_speckle_index", 0))
+                    star_speckle_ratio, phase_zero_match = app.calibrated_star_speckle_ratio(
+                        payload,
+                        (selected_index,),
+                    )
+                    optimization = app.calculator.optimize_common_mask(
+                        template,
+                        optimization_mode=str(payload.get("optimization_mode", "pixel_groups")),
+                        circle_center_pixel=(
+                            int(payload.get("circle_center_x", app.calculator.n_fft // 2)),
+                            int(payload.get("circle_center_y", app.calculator.n_fft // 2)),
+                        ),
+                        circle_radius_min_px=max(
+                            1,
+                            int(round(float(payload.get("circle_radius_px", 1.0))))
+                            - int(payload.get("search_radius_px", 24)),
+                        ),
+                        circle_radius_max_px=(
+                            int(round(float(payload.get("circle_radius_px", 1.0))))
+                            + int(payload.get("search_radius_px", 24))
+                        ),
+                        selected_speckle_index=selected_index,
+                        phase_steps=int(payload.get("phase_steps", 4)),
+                        phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
+                        phase_span_rad=float(payload.get("phase_span_rad", 2.0 * np.pi)),
+                        subtraction_mode=str(payload.get("subtraction_mode", "field")),
+                        include_star=bool(payload.get("include_star", True)),
+                        include_planet=bool(payload.get("include_planet", True)),
+                        include_speckles=bool(payload.get("include_speckles", True)),
+                        star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+                        star_speckle_ratio=star_speckle_ratio,
+                        lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
+                        search_radius_px=int(payload.get("search_radius_px", 24)),
+                        group_size_px=int(payload.get("group_size_px", 4)),
+                        iterations=int(payload.get("iterations", 12)),
+                        planet_penalty=float(payload.get("planet_penalty", 1.0)),
+                        progress_callback=app._progress_callback,
+                        stop_requested=app._stop_requested,
+                    )
+                    optimization["phase_zero_match"] = phase_zero_match
+                    app.last_optimization = optimization
+                    _json_response(self, 200, app.optimization_payload(optimization))
+                    return
+                if path == "/api/stop":
+                    app.stop_event.set()
+                    _json_response(self, 200, {"status": "Stop requested. Completed results will be kept."})
+                    return
+                if path == "/api/status":
+                    _json_response(self, 200, app.progress)
                     return
                 if path == "/api/save-result":
                     if app.last_result is None:
