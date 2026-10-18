@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,7 +11,11 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from .interactive_slm_gui import SLMLyotResponseCalculator, save_slm_lyot_result
+from .interactive_slm_gui import (
+    SLMLyotResponseCalculator,
+    default_slm_gui_config,
+    save_slm_lyot_result,
+)
 
 
 HTML = r"""<!doctype html>
@@ -42,9 +47,9 @@ HTML = r"""<!doctype html>
     }
     .app {
       display: grid;
-      grid-template-columns: minmax(340px, 380px) minmax(420px, 0.95fr) minmax(540px, 1.15fr);
+      grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
       gap: 14px;
-      min-height: 100vh;
+      height: 100dvh;
       padding: 14px;
     }
     .panel {
@@ -205,15 +210,22 @@ HTML = r"""<!doctype html>
     }
     .canvas-card {
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: auto minmax(0, 1fr) auto auto auto;
       gap: 8px;
       min-height: 0;
     }
+    .slm-viewport {
+      min-width: 0;
+      min-height: 0;
+      container-type: size;
+      display: grid;
+      place-items: center;
+    }
     .canvas-wrap {
       position: relative;
-      width: 100%;
+      width: min(100cqw, 100cqh);
       aspect-ratio: 1 / 1;
-      min-height: 360px;
+      min-height: 0;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #f4f4f4;
@@ -267,7 +279,7 @@ HTML = r"""<!doctype html>
       overflow: hidden;
       margin-top: 12px;
     }
-    .plot-canvas.short { height: 210px; }
+    .plot-canvas.short { height: 245px; }
     .plots-panel {
       display: grid;
       gap: 14px;
@@ -286,12 +298,29 @@ HTML = r"""<!doctype html>
     .comparison-summary .metric strong {
       font-size: 16px;
     }
+    #resultsDialog {
+      width: min(1200px, 96vw);
+      max-height: 92vh;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 18px;
+    }
+    #resultsDialog::backdrop { background: rgba(24,32,42,0.35); }
+    .results-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .figure-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0 14px; }
+    .figure-actions label { margin: 0; }
+    #tradeoffCandidates { max-height: 220px; overflow: auto; margin: 12px 0; }
+    #tradeoffCandidates table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    #tradeoffCandidates th, #tradeoffCandidates td { text-align: left; padding: 6px; border-bottom: 1px solid var(--line); }
+    [hidden] { display: none !important; }
     .results {
       margin-top: 12px;
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
+    .results:empty, .status:empty { display: none; }
     .metric {
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -332,14 +361,10 @@ HTML = r"""<!doctype html>
     details.advanced .advanced-body {
       margin-top: 12px;
     }
-    @media (max-width: 1200px) {
-      .app { grid-template-columns: 360px minmax(420px, 1fr); }
-      .right { grid-column: 1 / -1; }
-      .controls { max-height: none; }
-    }
     @media (max-width: 760px) {
-      .app { grid-template-columns: 1fr; }
-      .canvas-wrap { min-height: 280px; }
+      .app { grid-template-columns: 1fr; height: auto; }
+      .canvas-card { grid-row: 1; height: calc(100dvh - 28px); }
+      .controls { max-height: none; }
       .map-grid { grid-template-columns: 1fr; }
       .control-grid, .comparison-summary, .inline-checks { grid-template-columns: 1fr; }
     }
@@ -352,6 +377,14 @@ HTML = r"""<!doctype html>
 
       <div class="control-group run-group">
         <h2>Run</h2>
+        <div class="field">
+          <label for="comparisonType">Comparison type</label>
+          <select id="comparisonType">
+            <option value="separate">Separate masks centered on each source</option>
+            <option value="shared_mask">Same mask at user-selected position</option>
+          </select>
+          <div class="axis-note">For the same-mask comparison, set Center X/Y below or draw anywhere on the SLM. Comparison and optimization keep each tested mask at those pixels for both responses. Individual source sweeps use separate placements.</div>
+        </div>
         <div class="button-grid">
           <button class="primary wide" id="runComparisonBtn">Run comparison</button>
           <button id="runSpeckleSweepBtn">Run speckle sweep</button>
@@ -367,12 +400,12 @@ HTML = r"""<!doctype html>
         <div class="inline-checks">
           <label class="checkrow"><input id="starEnabled" type="checkbox" checked /> Star</label>
           <label class="checkrow"><input id="planetEnabled" type="checkbox" checked /> Planet</label>
-          <label class="checkrow"><input id="specklesEnabled" type="checkbox" /> Speckles</label>
+          <label class="checkrow"><input id="specklesEnabled" type="checkbox" checked /> Speckles</label>
         </div>
         <div class="control-grid">
           <div class="field">
             <label for="planetX">Planet X [lambda/D]</label>
-            <input id="planetX" type="number" step="0.1" value="4.0" />
+            <input id="planetX" type="number" step="0.1" value="11.0" />
           </div>
           <div class="field">
             <label for="planetY">Planet Y [lambda/D]</label>
@@ -412,7 +445,7 @@ HTML = r"""<!doctype html>
           <label for="tool">Shape</label>
           <select id="tool">
             <option value="freehand">Freehand pixels</option>
-            <option value="circle">Circle</option>
+            <option value="circle" selected>Circle</option>
             <option value="ring">Ring / Annulus</option>
           </select>
         </div>
@@ -457,7 +490,7 @@ HTML = r"""<!doctype html>
         <div class="control-grid">
           <div class="field">
             <label for="phaseSteps">Steps</label>
-            <input id="phaseSteps" type="number" min="2" step="1" value="4" />
+            <input id="phaseSteps" type="number" min="2" step="1" value="6" />
           </div>
           <div class="field">
             <label for="phaseStartRad">Start [rad]</label>
@@ -473,8 +506,12 @@ HTML = r"""<!doctype html>
 
       <div class="control-group">
         <h2>Optimization</h2>
-        <div class="control-grid">
-          <div class="field">
+        <div class="control-grid shape-control shape-circle">
+          <div class="field"><label for="circleRadiusMin">Min radius [px]</label><input id="circleRadiusMin" type="number" min="1" step="1" value="1" /></div>
+          <div class="field"><label for="circleRadiusMax">Max radius [px]</label><input id="circleRadiusMax" type="number" min="1" step="1" value="54" /></div>
+        </div>
+        <div class="control-grid" id="generalOptimizationParams">
+          <div class="field" id="searchRadiusOptimizationParam">
             <label for="searchRadiusPx">Search radius [px]</label>
             <input id="searchRadiusPx" type="number" min="1" step="1" value="24" />
           </div>
@@ -482,26 +519,25 @@ HTML = r"""<!doctype html>
             <label for="optIterations">Candidates</label>
             <input id="optIterations" type="number" min="1" step="1" value="12" />
           </div>
-          <div class="field">
+          <div class="field" id="pixelGroupOptimizationParam">
             <label for="groupSizePx">Pixel group [px]</label>
             <input id="groupSizePx" type="number" min="1" step="1" value="4" />
           </div>
-          <div class="field">
-            <label for="planetPenalty">Penalty</label>
-            <input id="planetPenalty" type="number" min="0" step="0.1" value="1" />
-          </div>
+        </div>
+        <div class="control-grid shape-control shape-ring" hidden>
+          <div class="field"><label for="ringInnerMin">Inner min [px]</label><input id="ringInnerMin" type="number" min="0" step="1" value="10" /></div>
+          <div class="field"><label for="ringInnerMax">Inner max [px]</label><input id="ringInnerMax" type="number" min="0" step="1" value="30" /></div>
+          <div class="field"><label for="ringOuterMin">Outer min [px]</label><input id="ringOuterMin" type="number" min="1" step="1" value="30" /></div>
+          <div class="field"><label for="ringOuterMax">Outer max [px]</label><input id="ringOuterMax" type="number" min="1" step="1" value="50" /></div>
+          <div class="field"><label for="ringInnerStep">Inner step [px]</label><input id="ringInnerStep" type="number" min="1" step="1" value="5" /></div>
+          <div class="field"><label for="ringOuterStep">Outer step [px]</label><input id="ringOuterStep" type="number" min="1" step="1" value="5" /></div>
+          <div class="axis-note">Test every inner/outer pair in these ranges with inner &lt; outer.</div>
         </div>
         <button class="primary" id="optimizeMaskBtn" style="width:100%;">Start optimization</button>
-        <div class="axis-note">Circle masks optimize radius. Other masks use pixel groups. Ratio score selects the best candidate.</div>
+        <div class="axis-note">Circles optimize radius; rings optimize inner and outer radii at the selected center. Other masks use pixel groups. Ratio score selects the best candidate.</div>
       </div>
 
-      <div class="control-group">
-        <h2>Results</h2>
-        <div class="button-grid">
-          <button id="saveResultBtn">Save results</button>
-          <button id="saveLogBtn">Save log</button>
-        </div>
-      </div>
+      <button id="showResultsBtn" disabled>Open results</button>
 
       <details class="advanced">
         <summary>Advanced settings</summary>
@@ -512,7 +548,7 @@ HTML = r"""<!doctype html>
           </div>
           <div class="field">
             <label for="referenceSubtractPercent">Reference subtraction [%]</label>
-            <input id="referenceSubtractPercent" type="number" min="0" step="1" value="100" />
+            <input id="referenceSubtractPercent" type="number" min="0" step="1" value="80" />
           </div>
           <div class="field">
             <label for="subtractionMode">Subtraction model</label>
@@ -541,27 +577,39 @@ HTML = r"""<!doctype html>
 
     <section class="panel canvas-card">
       <h2>Focal-plane SLM mask</h2>
+      <div class="slm-viewport">
       <div class="canvas-wrap">
         <canvas id="slmCanvas"></canvas>
       </div>
-      <div class="legend">
-        <div><span class="swatch" style="background:#d7191c"></span>pi SLM pixels</div>
-        <div><span class="swatch" style="background:#168245"></span>speckle placement</div>
-        <div><span class="swatch" style="background:#1d70b8"></span>planet placement</div>
-        <div><span class="swatch" style="background:#c28a00"></span>star</div>
-        <div><span class="swatch" style="background:#00a5b8"></span>planet</div>
-        <div><span class="swatch" style="background:#b24bbd"></span>coherent speckles</div>
       </div>
-      <div class="axis-note">SLM coordinates are focal-plane lambda/D. The source markers show where each source PSF is centered on this focal grid.</div>
+      <div class="legend">
+        <div><span class="swatch" style="background:#d7191c"></span>Modulation mask</div>
+        <div><span class="swatch" style="background:#168245"></span>Speckle-position mask</div>
+        <div><span class="swatch" style="background:#1d70b8"></span>Planet-position mask</div>
+        <div><span class="swatch" style="background:#c28a00"></span>Star</div>
+        <div><span class="swatch" style="background:#00a5b8"></span>Planet</div>
+        <div><span class="swatch" style="background:#b24bbd"></span>Enabled speckles</div>
+      </div>
+      <div class="axis-note">Enabled sources and the modulation region are shown on the full SLM grid in lambda/D. Comparison and optimization results show their applied mask placements; the green and blue masks are used in separate runs. A same-mask comparison shows one red mask at your chosen position.</div>
     </section>
 
-    <section class="panel right plots-panel">
-      <h2>Results</h2>
-      <div id="comparisonSummary" class="comparison-summary">
-        <div class="metric"><span>Speckle peak-to-peak modulation</span><strong>--</strong></div>
-        <div class="metric"><span>Planet peak-to-peak modulation</span><strong>--</strong></div>
-        <div class="metric"><span>Modulation ratio</span><strong>--</strong></div>
+  </main>
+  <dialog id="resultsDialog" aria-labelledby="resultsTitle">
+    <section class="plots-panel">
+      <div class="results-header"><h1 id="resultsTitle">Results</h1><button id="closeResultsBtn">Close results</button></div>
+      <div class="control-group">
+        <h2>Results</h2>
+        <div class="button-grid">
+          <button id="saveResultBtn">Save results</button>
+          <button id="saveLogBtn">Save log</button>
+          <button id="saveFiguresBtn">Save selected images</button>
+        </div>
+        <label class="checkrow"><input id="autoSaveFigures" type="checkbox" /> Auto-save figures after runs</label>
       </div>
+
+
+      <div id="comparisonSummary" class="comparison-summary" hidden></div>
+      <section id="mapResults" hidden>
       <h2>Lyot-plane response</h2>
       <div class="map-grid">
         <div class="map"><div class="map-title">Star</div><div class="map-canvas"><canvas id="starMap"></canvas></div></div>
@@ -570,23 +618,41 @@ HTML = r"""<!doctype html>
         <div class="map"><div class="map-title">Coherent star + speckles</div><div class="map-canvas"><canvas id="coherentMap"></canvas></div></div>
         <div class="map"><div class="map-title">Incoherent star + planet amplitude</div><div class="map-canvas"><canvas id="incoherentMap"></canvas></div></div>
       </div>
+      </section>
+      <section id="currentPhaseResults" hidden>
       <div class="map-title">Current mask response, integrated Lyot-stop power</div>
       <div class="plot-canvas"><canvas id="phasePlot"></canvas></div>
-      <div class="map-grid">
-        <div>
-          <div class="map-title">Speckle-position sweep: power vs phase [rad]</div>
+      </section>
+      <section id="comparisonResults" class="map-grid" hidden>
+        <div id="speckleSweepResults" hidden>
+          <div class="map-title" id="comparisonSweepTitle">Speckle-position sweep: power vs phase [rad]</div>
           <div class="plot-canvas short"><canvas id="speckleSweepPlot"></canvas></div>
         </div>
-        <div>
+        <div id="planetSweepResults" hidden>
           <div class="map-title">Planet-position sweep: power vs phase [rad]</div>
           <div class="plot-canvas short"><canvas id="planetSweepPlot"></canvas></div>
         </div>
+      </section>
+      <section id="optimizationResults" hidden>
+      <div id="ringResults" hidden>
+        <div class="map-title">Modulation ratio vs ring radii</div>
+        <div class="plot-canvas" style="height:480px;"><canvas id="ringPlot"></canvas></div>
+        <div class="axis-note">Each tested ring is labeled with R = Speckle PP / Planet PP. Grey cells have an undefined ratio; blank cells were not tested. The best ratio is outlined.</div>
+      </div>
+      <div id="radiusResults" hidden>
+        <div class="map-title">Peak-to-peak modulation vs circle radius</div>
+        <div class="plot-canvas" style="height:380px;"><canvas id="radiusPlot"></canvas></div>
+        <div class="axis-note">Planet and speckle peak-to-peak changes in integrated Lyot-stop power for each tested circle radius. R labels give speckle PP / planet PP. The dashed line marks the best score.</div>
       </div>
       <div class="map-title">Optimization trade-off</div>
-      <div class="plot-canvas short"><canvas id="tradeoffPlot"></canvas></div>
+      <div class="plot-canvas" style="height:380px;"><canvas id="tradeoffPlot"></canvas></div>
+      <div class="axis-note">Each dot is a tested mask. Lower planet modulation and higher speckle modulation are preferred. PP means peak-to-peak change in integrated Lyot-stop power (simulation power units).</div>
+      <div id="tradeoffCandidates"></div>
+      </section>
       <div id="metrics" class="results"></div>
+      <div id="resultSaveStatus" class="status" role="status"></div>
     </section>
-  </main>
+  </dialog>
 
   <script>
     const state = {
@@ -603,6 +669,7 @@ HTML = r"""<!doctype html>
       lastComparison: null,
       lastComparisonSignature: null,
       lastOptimization: null,
+      lastProcess: null,
       placedMasks: null,
       pollTimer: null,
     };
@@ -616,6 +683,7 @@ HTML = r"""<!doctype html>
       evaluateModulationBtn: document.getElementById("evaluateModulationBtn"),
       runSpeckleSweepBtn: document.getElementById("runSpeckleSweepBtn"),
       runPlanetSweepBtn: document.getElementById("runPlanetSweepBtn"),
+      comparisonType: document.getElementById("comparisonType"),
       runComparisonBtn: document.getElementById("runComparisonBtn"),
       optimizeMaskBtn: document.getElementById("optimizeMaskBtn"),
       stopBtn: document.getElementById("stopBtn"),
@@ -626,6 +694,8 @@ HTML = r"""<!doctype html>
       loadMaskBtn: document.getElementById("loadMaskBtn"),
       saveResultBtn: document.getElementById("saveResultBtn"),
       saveLogBtn: document.getElementById("saveLogBtn"),
+      saveFiguresBtn: document.getElementById("saveFiguresBtn"),
+      autoSaveFigures: document.getElementById("autoSaveFigures"),
       addRegionBtn: document.getElementById("addRegionBtn"),
       replaceRegionBtn: document.getElementById("replaceRegionBtn"),
       planetX: document.getElementById("planetX"),
@@ -644,7 +714,6 @@ HTML = r"""<!doctype html>
       searchRadiusPx: document.getElementById("searchRadiusPx"),
       groupSizePx: document.getElementById("groupSizePx"),
       optIterations: document.getElementById("optIterations"),
-      planetPenalty: document.getElementById("planetPenalty"),
       matchPhaseZeroPower: document.getElementById("matchPhaseZeroPower"),
       maskFile: document.getElementById("maskFile"),
       shapeParams: document.getElementById("shapeParams"),
@@ -659,7 +728,12 @@ HTML = r"""<!doctype html>
       phasePlot: document.getElementById("phasePlot"),
       speckleSweepPlot: document.getElementById("speckleSweepPlot"),
       planetSweepPlot: document.getElementById("planetSweepPlot"),
+      radiusPlot: document.getElementById("radiusPlot"),
+      ringPlot: document.getElementById("ringPlot"),
       tradeoffPlot: document.getElementById("tradeoffPlot"),
+      resultsDialog: document.getElementById("resultsDialog"),
+      showResultsBtn: document.getElementById("showResultsBtn"),
+      tradeoffCandidates: document.getElementById("tradeoffCandidates"),
       maps: {
         star: document.getElementById("starMap"),
         planet: document.getElementById("planetMap"),
@@ -669,7 +743,103 @@ HTML = r"""<!doctype html>
       }
     };
 
-    function setStatus(text) { els.status.textContent = text || ""; }
+    function setStatus(text) {
+      els.status.textContent = text || "";
+      document.getElementById("resultSaveStatus").textContent = text || "";
+    }
+
+    const figureDefinitions = [
+      ["slm_mask", "slmCanvas", "SLM mask", () => Boolean(state.config)],
+      ["star_map", "starMap", "Star map", () => mapAvailable("star")],
+      ["planet_map", "planetMap", "Planet map", () => mapAvailable("planet")],
+      ["speckle_map", "speckleMap", "Speckle map", () => mapAvailable("speckle")],
+      ["coherent_map", "coherentMap", "Coherent map", () => mapAvailable("coherent")],
+      ["incoherent_map", "incoherentMap", "Incoherent map", () => mapAvailable("incoherent")],
+      ["current_phase_plot", "phasePlot", "Current phase plot", () => Boolean(state.lastSweep)],
+      ["speckle_sweep_plot", "speckleSweepPlot", "Speckle-position sweep", () => Boolean(state.lastComparison?.sweeps?.speckle_position || state.lastComparison?.sweeps?.shared_mask)],
+      ["planet_sweep_plot", "planetSweepPlot", "Planet-position sweep", () => Boolean(state.lastComparison?.sweeps?.planet_position)],
+      ["optimization_radius_plot", "radiusPlot", "Peak-to-peak modulation vs circle radius", () => circleRadiusPoints(state.lastOptimization).length > 0],
+      ["optimization_ring_plot", "ringPlot", "Modulation ratio vs ring radii", () => ringRadiusPoints(state.lastOptimization).length > 0],
+      ["optimization_tradeoff_plot", "tradeoffPlot", "Optimization trade-off", () => Boolean(state.lastOptimization?.history?.length)],
+    ];
+
+    function mapAvailable(name) {
+      return Boolean(state.lastResult?.maps?.[name]) &&
+        Object.hasOwn(state.lastResult.metrics || {}, `A_${name}`);
+    }
+
+    function updateResultVisibility() {
+      const sweeps = state.lastComparison?.sweeps || {};
+      const hasComparison = Boolean(sweeps.shared_mask || sweeps.speckle_position || sweeps.planet_position);
+      document.getElementById("comparisonSweepTitle").textContent = sweeps.shared_mask
+        ? "Same-mask sweep: planet and speckle power vs phase [rad]"
+        : "Speckle-position sweep: power vs phase [rad]";
+      const hasMaps = Object.keys(els.maps).some(mapAvailable);
+      for (const [id, visible] of [
+        ["mapResults", hasMaps],
+        ["currentPhaseResults", Boolean(state.lastSweep)],
+        ["comparisonResults", hasComparison],
+        ["speckleSweepResults", Boolean(sweeps.shared_mask || sweeps.speckle_position)],
+        ["planetSweepResults", Boolean(sweeps.planet_position)],
+        ["comparisonSummary", hasComparison],
+        ["optimizationResults", Boolean(state.lastOptimization?.history?.length)],
+        ["radiusResults", circleRadiusPoints(state.lastOptimization).length > 0],
+        ["ringResults", ringRadiusPoints(state.lastOptimization).length > 0],
+      ]) document.getElementById(id).hidden = !visible;
+      for (const [name, canvas] of Object.entries(els.maps)) {
+        canvas.closest(".map").hidden = !mapAvailable(name);
+      }
+    }
+
+    function setupFigureControls() {
+      for (const [key, id, label] of figureDefinitions) {
+        const actions = document.createElement("div");
+        actions.className = "figure-actions";
+        const button = document.createElement("button");
+        button.dataset.saveFigure = key;
+        button.textContent = "Save image";
+        button.setAttribute("aria-label", `Save ${label} image`);
+        button.addEventListener("click", () => saveFigures(key).catch(err => setStatus(err.message)));
+        const selection = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = true;
+        checkbox.dataset.figure = key;
+        selection.append(checkbox, " Include in bulk save");
+        actions.append(button, selection);
+        const host = id === "slmCanvas"
+          ? document.getElementById(id).closest(".slm-viewport")
+          : document.getElementById(id).parentElement;
+        host.after(actions);
+      }
+    }
+
+    function updateFigureControls() {
+      for (const [key, id, label, available] of figureDefinitions) {
+        document.querySelector(`button[data-save-figure="${key}"]`).disabled = !available();
+      }
+    }
+
+    function redrawResults() {
+      redrawMaps();
+      drawPhasePlot(state.lastSweep);
+      const sweeps = state.lastComparison?.sweeps || {};
+      const scale = phasePlotScaleFromSweeps([sweeps.shared_mask || sweeps.speckle_position, sweeps.planet_position]);
+      drawPhasePlotOn(els.speckleSweepPlot, (sweeps.shared_mask || sweeps.speckle_position) || null, scale);
+      drawPhasePlotOn(els.planetSweepPlot, sweeps.planet_position || null, scale);
+      drawRadiusPlot(state.lastOptimization);
+      drawRingPlot(state.lastOptimization);
+      drawTradeoffPlot(state.lastOptimization);
+    }
+
+    function showResults() {
+      if (!(state.lastResult || state.lastSweep || state.lastComparison || state.lastOptimization?.history?.length)) return;
+      els.showResultsBtn.disabled = false;
+      if (!els.resultsDialog.open) els.resultsDialog.showModal();
+      updateResultVisibility();
+      redrawResults();
+      updateFigureControls();
+    }
 
     function resizeCanvas(canvas) {
       const rect = canvas.getBoundingClientRect();
@@ -682,10 +852,15 @@ HTML = r"""<!doctype html>
       }
     }
 
+    function slmViewExtent() {
+      const cfg = state.config;
+      const half = cfg.n_fft / (2 * cfg.focal_sampling);
+      return [-half, half, -half, half];
+    }
+
     function slmPixelToCanvas(x, y) {
       const cfg = state.config;
-      const minX = cfg.slm_extent[0], maxX = cfg.slm_extent[1];
-      const minY = cfg.slm_extent[2], maxY = cfg.slm_extent[3];
+      const [minX, maxX, minY, maxY] = slmViewExtent();
       const lamX = (x - (cfg.n_fft - 1) / 2) / cfg.focal_sampling;
       const lamY = (y - (cfg.n_fft - 1) / 2) / cfg.focal_sampling;
       return [
@@ -699,8 +874,9 @@ HTML = r"""<!doctype html>
       const cfg = state.config;
       const u = (event.clientX - rect.left) / rect.width;
       const v = (event.clientY - rect.top) / rect.height;
-      const lamX = cfg.slm_extent[0] + u * (cfg.slm_extent[1] - cfg.slm_extent[0]);
-      const lamY = cfg.slm_extent[3] - v * (cfg.slm_extent[3] - cfg.slm_extent[2]);
+      const [minX, maxX, minY, maxY] = slmViewExtent();
+      const lamX = minX + u * (maxX - minX);
+      const lamY = maxY - v * (maxY - minY);
       const x = Math.round(lamX * cfg.focal_sampling + (cfg.n_fft - 1) / 2);
       const y = Math.round(lamY * cfg.focal_sampling + (cfg.n_fft - 1) / 2);
       if (x < 0 || y < 0 || x >= cfg.n_fft || y >= cfg.n_fft) return null;
@@ -750,6 +926,9 @@ HTML = r"""<!doctype html>
 
     function updateShapeParameterVisibility() {
       const tool = els.tool.value;
+      document.getElementById("generalOptimizationParams").hidden = tool === "ring";
+      document.getElementById("pixelGroupOptimizationParam").hidden = tool !== "freehand";
+      document.getElementById("searchRadiusOptimizationParam").hidden = tool !== "freehand";
       const showShape = tool === "circle" || tool === "ring";
       els.shapeParams.hidden = false;
       for (const node of document.querySelectorAll(".shape-control")) node.hidden = true;
@@ -867,8 +1046,7 @@ HTML = r"""<!doctype html>
     }
 
     function drawMarker(ctx, marker) {
-      const cfg = state.config;
-      const [minX, maxX, minY, maxY] = cfg.slm_extent;
+      const [minX, maxX, minY, maxY] = slmViewExtent();
       const x = (marker.x - minX) / (maxX - minX) * els.slm.width;
       const y = els.slm.height - (marker.y - minY) / (maxY - minY) * els.slm.height;
       if (x < 0 || y < 0 || x > els.slm.width || y > els.slm.height) return;
@@ -915,6 +1093,10 @@ HTML = r"""<!doctype html>
         checkbox.className = "speckle-choice";
         checkbox.value = String(marker.index);
         checkbox.checked = true;
+        checkbox.addEventListener("change", () => {
+          markResultsOutdated();
+          redrawSlm();
+        });
         const text = document.createElement("span");
         text.textContent = `${marker.label}: (${marker.x.toFixed(2)}, ${marker.y.toFixed(2)}) lambda/D`;
         row.appendChild(checkbox);
@@ -996,12 +1178,12 @@ HTML = r"""<!doctype html>
         state.config = data;
         renderSpeckleSelector();
         renderSourceGeometryControls();
-        redrawSlm();
         state.lastResult = null;
         state.lastComparison = null;
         state.lastComparisonSignature = null;
         state.lastOptimization = null;
         state.placedMasks = null;
+        redrawSlm();
         renderComparisonSummary(null, "Settings changed. Run comparison again.");
         setStatus("Source locations updated. Press Apply to propagate.");
       } catch (err) {
@@ -1102,6 +1284,30 @@ HTML = r"""<!doctype html>
       ctx.restore();
     }
 
+    function enabledSourceMarkers() {
+      const selected = new Set(selectedSpeckleIndices());
+      return (state.config.source_markers || []).filter(marker => {
+        if (marker.kind === "star") return document.getElementById("starEnabled").checked;
+        if (marker.kind === "planet") return document.getElementById("planetEnabled").checked;
+        return marker.kind === "speckle" && document.getElementById("specklesEnabled").checked && selected.has(marker.index);
+      });
+    }
+
+    function displayedSlmMasks() {
+      if ((state.lastProcess?.includes("comparison") || state.lastProcess === "optimization") && state.placedMasks &&
+          state.lastComparisonSignature === currentComparisonSignature()) {
+        const sweeps = state.lastComparison?.sweeps || {};
+        const masks = [
+          ["shared_mask", "rgba(215,25,28,0.92)"],
+          ["speckle_position", "rgba(22,130,69,0.65)"],
+          ["planet_position", "rgba(29,112,184,0.65)"],
+        ].filter(([key]) => sweeps[key] && state.placedMasks[key])
+          .map(([key, color]) => ({mask: state.placedMasks[key], color}));
+        if (masks.length) return masks;
+      }
+      return [{mask: state.mask, color: "rgba(215,25,28,0.92)"}];
+    }
+
     function redrawSlm() {
       if (!state.config) return;
       resizeCanvas(els.slm);
@@ -1113,59 +1319,35 @@ HTML = r"""<!doctype html>
       const n = state.config.n_fft;
       const cellW = els.slm.width / n;
       const cellH = els.slm.height / n;
-      ctx.fillStyle = "rgba(215,25,28,0.92)";
-      for (let y = 0; y < n; y++) {
-        const row = y * n;
-        for (let x = 0; x < n; x++) {
-          if (state.mask[row + x]) {
-            const px = x * cellW;
-            const py = els.slm.height - (y + 1) * cellH;
-            ctx.fillRect(px, py, Math.max(1, cellW), Math.max(1, cellH));
-          }
-        }
-      }
-
-      ctx.strokeStyle = "#9aa3ad";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, els.slm.height / 2);
-      ctx.lineTo(els.slm.width, els.slm.height / 2);
-      ctx.moveTo(els.slm.width / 2, 0);
-      ctx.lineTo(els.slm.width / 2, els.slm.height);
-      ctx.stroke();
-
-      drawAxes(ctx, els.slm.width, els.slm.height, state.config.slm_extent, {
-        label: "lambda/D",
-        targetTicks: 6
-      });
-
-      for (const marker of state.config.source_markers) drawMarker(ctx, marker);
-
-      if (state.placedMasks) {
-        const overlays = [
-          {key: "speckle_position", color: "rgba(22,130,69,0.42)"},
-          {key: "planet_position", color: "rgba(29,112,184,0.36)"},
-        ];
-        for (const overlay of overlays) {
-          const mask = state.placedMasks[overlay.key];
-          if (!mask) continue;
-          ctx.fillStyle = overlay.color;
-          for (let y = 0; y < n; y++) {
-            const row = y * n;
-            for (let x = 0; x < n; x++) {
-              if (mask[row + x]) {
-                const px = x * cellW;
-                const py = els.slm.height - (y + 1) * cellH;
-                ctx.fillRect(px, py, Math.max(1, cellW), Math.max(1, cellH));
-              }
+      const masks = displayedSlmMasks();
+      const selected = new Uint8Array(n * n);
+      let selectedCount = 0;
+      for (const {mask, color} of masks) {
+        ctx.fillStyle = color;
+        for (let y = 0; y < n; y++) {
+          const row = y * n;
+          for (let x = 0; x < n; x++) {
+            if (mask[row + x]) {
+              if (!selected[row + x]) selectedCount++;
+              selected[row + x] = 1;
+              const px = x * cellW;
+              const py = els.slm.height - (y + 1) * cellH;
+              ctx.fillRect(px, py, Math.max(1, cellW), Math.max(1, cellH));
             }
           }
         }
       }
 
+      drawAxes(ctx, els.slm.width, els.slm.height, slmViewExtent(), {
+        label: "lambda/D",
+        targetTicks: 6
+      });
+
+      for (const marker of enabledSourceMarkers()) drawMarker(ctx, marker);
+
       ctx.fillStyle = "#18202a";
       ctx.font = `${Math.max(12, Math.round(els.slm.width / 48))}px system-ui`;
-      const selectedText = `selected: ${maskCount()} px`;
+      const selectedText = `modulation region: ${selectedCount} px`;
       const selectedWidth = ctx.measureText(selectedText).width + 12;
       ctx.fillStyle = "rgba(255,255,255,0.76)";
       ctx.fillRect(8, els.slm.height - 32, selectedWidth, 22);
@@ -1263,6 +1445,7 @@ HTML = r"""<!doctype html>
       const mode = document.getElementById("displayMode").value;
       let vmin = Infinity, vmax = -Infinity;
       for (const key of Object.keys(els.maps)) {
+        if (!mapAvailable(key)) continue;
         const payload = state.lastResult.maps[key];
         const data = payload.modes ? payload.modes[mode] : payload.values;
         if (mode === "phase") {
@@ -1279,11 +1462,30 @@ HTML = r"""<!doctype html>
       }
       const sharedScale = {vmin, vmax};
       for (const key of Object.keys(els.maps)) {
+        if (!mapAvailable(key)) continue;
         drawMap(els.maps[key], state.lastResult.maps[key], sharedScale);
       }
     }
 
-    function drawPhasePlot(sweep) {
+    function phasePlotScaleFromSweeps(sweeps) {
+      let ymin = Infinity, ymax = -Infinity;
+      for (const sweep of sweeps || []) {
+        if (!sweep || !sweep.powers) continue;
+        const primaryKeys = ["coherent", "incoherent"].filter(key => sweep.powers[key]);
+        const keys = primaryKeys.length ? primaryKeys : Object.keys(sweep.powers);
+        for (const key of keys) {
+          for (const value of sweep.powers[key] || []) {
+            if (!Number.isFinite(value)) continue;
+            ymin = Math.min(ymin, value);
+            ymax = Math.max(ymax, value);
+          }
+        }
+      }
+      if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) return null;
+      return {ymin, ymax};
+    }
+
+    function drawPhasePlot(sweep, fixedScale) {
       resizeCanvas(els.phasePlot);
       const canvas = els.phasePlot;
       const ctx = canvas.getContext("2d");
@@ -1294,22 +1496,15 @@ HTML = r"""<!doctype html>
 
       const phases = sweep.phases;
       const series = [
-        {key: "coherent", label: "coherent star + speckles", color: "#005ea8", width: 3.2, dash: [], marker: "circle", alpha: 1},
-        {key: "incoherent", label: "incoherent star + planet", color: "#c51b29", width: 3.2, dash: [10, 5], marker: "square", alpha: 1},
+        {key: "coherent", label: "coherent", color: "#005ea8", width: 3.2, dash: [], marker: "circle", alpha: 1},
+        {key: "incoherent", label: "incoherent", color: "#c51b29", width: 3.2, dash: [10, 5], marker: "square", alpha: 1},
         {key: "star", label: "star", color: "#9f6b00", width: 1.5, dash: [3, 4], marker: "triangle", alpha: 0.72},
         {key: "speckle", label: "speckles", color: "#7a3db8", width: 1.5, dash: [8, 4, 2, 4], marker: "diamond", alpha: 0.72},
         {key: "planet", label: "planet", color: "#007f91", width: 1.5, dash: [2, 3], marker: "cross", alpha: 0.72},
       ].filter(item => sweep.powers && sweep.powers[item.key]);
-      let ymin = Infinity, ymax = -Infinity;
-      const primary = series.filter(item => item.key === "coherent" || item.key === "incoherent");
-      const scaleSeries = primary.length ? primary : series;
-      for (const item of scaleSeries) {
-        for (const value of sweep.powers[item.key]) {
-          if (!Number.isFinite(value)) continue;
-          ymin = Math.min(ymin, value);
-          ymax = Math.max(ymax, value);
-        }
-      }
+      const scale = fixedScale || phasePlotScaleFromSweeps([sweep]);
+      let ymin = scale ? scale.ymin : Infinity;
+      let ymax = scale ? scale.ymax : -Infinity;
       if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) {
         ymin = 0;
         ymax = 1;
@@ -1328,10 +1523,16 @@ HTML = r"""<!doctype html>
       const pad = 0.08 * (ymax - ymin);
       ymin -= pad;
       ymax += pad;
+      const fontSize = Math.max(11, Math.round(canvas.width / 62));
+      const legendCols = canvas.width >= 340 ? 2 : 1;
+      const legendRows = Math.ceil(series.length / legendCols);
+      const legendLineH = fontSize + 7;
+      const legendTop = 12;
+      const legendHeight = legendRows * legendLineH + 14;
       const margin = {
         left: Math.max(48, Math.round(canvas.width * 0.09)),
         right: 18,
-        top: 18,
+        top: legendTop + legendHeight + 10,
         bottom: 42
       };
       const plotW = canvas.width - margin.left - margin.right;
@@ -1342,7 +1543,7 @@ HTML = r"""<!doctype html>
       ctx.save();
       ctx.strokeStyle = "rgba(24,32,42,0.16)";
       ctx.fillStyle = "#5b6673";
-      ctx.font = `${Math.max(11, Math.round(canvas.width / 62))}px system-ui`;
+      ctx.font = `${fontSize}px system-ui`;
       ctx.lineWidth = 1;
       for (let i = 0; i <= 4; i++) {
         const x = margin.left + (i / 4) * plotW;
@@ -1428,27 +1629,29 @@ HTML = r"""<!doctype html>
       }
       ctx.restore();
 
-      let legendX = margin.left + 8;
-      let legendY = margin.top + 6;
-      const legendWidth = Math.min(plotW - 16, 245);
-      const legendHeight = series.length * 18 + 8;
-      ctx.fillStyle = "rgba(255,255,255,0.86)";
-      ctx.fillRect(legendX - 6, legendY - 11, legendWidth, legendHeight);
+      const legendX = margin.left;
+      const legendWidth = canvas.width - margin.left - margin.right;
+      const legendColW = legendWidth / legendCols;
+      ctx.fillStyle = "rgba(247,249,251,0.96)";
+      ctx.fillRect(legendX - 6, legendTop, legendWidth + 12, legendHeight);
       ctx.strokeStyle = "rgba(24,32,42,0.18)";
-      ctx.strokeRect(legendX - 6, legendY - 11, legendWidth, legendHeight);
-      for (const item of series) {
+      ctx.strokeRect(legendX - 6, legendTop, legendWidth + 12, legendHeight);
+      series.forEach((item, idx) => {
+        const col = idx % legendCols;
+        const row = Math.floor(idx / legendCols);
+        const x = legendX + col * legendColW + 6;
+        const y = legendTop + 12 + row * legendLineH;
         ctx.strokeStyle = item.color;
         ctx.lineWidth = item.width;
         ctx.setLineDash(item.dash);
         ctx.beginPath();
-        ctx.moveTo(legendX, legendY);
-        ctx.lineTo(legendX + 22, legendY);
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + 22, y);
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle = "#18202a";
-        ctx.fillText(item.label, legendX + 29, legendY - 6);
-        legendY += 18;
-      }
+        ctx.fillText(item.label, x + 29, y + 4);
+      });
       ctx.fillStyle = "#18202a";
       ctx.fillText("phase [rad]", margin.left + plotW / 2 - 28, canvas.height - 12);
       ctx.restore();
@@ -1526,7 +1729,7 @@ HTML = r"""<!doctype html>
         !complete ? "Incomplete result" : (outdated ? "Settings changed after this result" : "")
       );
       const m = comparison.metrics || {};
-      const rows = [
+      const rows = comparison.comparison_type === "shared_mask" ? [["main_planet_mean", "Mean planet power"]] : [
         ["speckle_run_planet_pp", "Planet pp, speckle mask"],
         ["planet_run_speckle_pp", "Speckle pp, planet mask"],
         ["main_planet_mean", "Mean planet power"],
@@ -1539,7 +1742,7 @@ HTML = r"""<!doctype html>
         div.innerHTML = `<span>${label}</span><strong>${formatRatio(m[key])}${suffix}</strong>`;
         els.metrics.appendChild(div);
       }
-      for (const [runKey, label] of [["speckle_position", "Speckle-position run"], ["planet_position", "Planet-position run"]]) {
+      for (const [runKey, label] of [["shared_mask", "Same-mask run"], ["speckle_position", "Speckle-position run"], ["planet_position", "Planet-position run"]]) {
         const sweep = comparison.sweeps && comparison.sweeps[runKey];
         if (!sweep) continue;
         for (const responseName of ["speckle_response", "planet_response"]) {
@@ -1561,6 +1764,7 @@ HTML = r"""<!doctype html>
     function currentComparisonSignature() {
       if (!state.mask || !state.config) return "";
       const payload = commonSweepPayload();
+      payload.comparison_type = els.comparisonType.value || "separate";
       return JSON.stringify(payload);
     }
 
@@ -1568,6 +1772,175 @@ HTML = r"""<!doctype html>
       if (!state.lastComparison) return;
       renderComparisonMetrics(state.lastComparison);
       setStatus("Settings changed. Existing comparison may be outdated.");
+    }
+
+    function circleRadiusPoints(optimization) {
+      return (optimization?.history || []).map((item, index) => ({...item, index}))
+        .filter(item => Number.isFinite(item.radius_px) && item.radius_px >= 0)
+        .sort((a, b) => a.radius_px - b.radius_px);
+    }
+
+    function ringRadiusPoints(optimization) {
+      return (optimization?.history || []).map((item, index) => ({...item, index}))
+        .filter(item => Number.isFinite(item.inner_radius_px) && Number.isFinite(item.outer_radius_px));
+    }
+
+    function drawRingPlot(optimization) {
+      const canvas = els.ringPlot;
+      resizeCanvas(canvas);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const points = ringRadiusPoints(optimization);
+      if (!points.length) return;
+      const sorted = values => [...new Set(values)].sort((a, b) => a - b);
+      const xs = optimization.ring_grid?.inner_radii_px || sorted(points.map(p => p.inner_radius_px));
+      const ys = optimization.ring_grid?.outer_radii_px || sorted(points.map(p => p.outer_radius_px));
+      const dpr = window.devicePixelRatio || 1;
+      const width = canvas.width / dpr, height = canvas.height / dpr;
+      const margin = {left: 85, right: 110, top: 52, bottom: 65};
+      const w = width - margin.left - margin.right, h = height - margin.top - margin.bottom;
+      const cw = w / xs.length, ch = h / ys.length;
+      const ratios = points.map(p => p.ratio_pp).filter(Number.isFinite);
+      const min = ratios.length ? Math.min(...ratios) : 0;
+      const max = ratios.length ? Math.max(...ratios) : 1;
+      const color = t => `rgb(${Math.round(240 - 210*t)},${Math.round(245 - 125*t)},${Math.round(255 - 95*t)})`;
+      ctx.save(); ctx.scale(dpr, dpr);
+      ctx.font = "12px system-ui"; ctx.fillStyle = "#18202a"; ctx.textAlign = "left";
+      ctx.fillText("R = Speckle PP / Planet PP", margin.left, 20);
+      const best = points.find(p => p.index === optimization.best_index);
+      if (best) ctx.fillText(`Best ring: inner ${best.inner_radius_px} px, outer ${best.outer_radius_px} px`, margin.left, 38);
+      // Blank cells include invalid inner >= outer pairs and unfinished candidates.
+      ctx.strokeStyle = "#d5dbe2"; ctx.lineWidth = 1;
+      xs.forEach((inner, ix) => ys.forEach((outer, iy) => {
+        ctx.strokeRect(margin.left + ix*cw, margin.top + (ys.length - 1 - iy)*ch, cw, ch);
+      }));
+      for (const point of points) {
+        const x = margin.left + xs.indexOf(point.inner_radius_px)*cw;
+        const y = margin.top + (ys.length - 1 - ys.indexOf(point.outer_radius_px))*ch;
+        const finite = Number.isFinite(point.ratio_pp);
+        ctx.fillStyle = finite ? color(max === min ? 0.5 : (point.ratio_pp - min)/(max - min)) : "#ddd";
+        ctx.fillRect(x + 1, y + 1, cw - 2, ch - 2);
+        const label = finite ? point.ratio_pp.toExponential(2) : "undefined";
+        ctx.font = "12px system-ui";
+        const fontSize = Math.min(12, 12 * (cw - 6) / Math.max(1, ctx.measureText(label).width), ch * 0.45);
+        ctx.font = `${Math.max(1, fontSize)}px system-ui`;
+        ctx.textAlign = "center"; ctx.fillStyle = "#18202a";
+        ctx.lineWidth = 3; ctx.strokeStyle = "#fff";
+        ctx.strokeText(label, x + cw/2, y + ch/2 + fontSize/3);
+        ctx.fillText(label, x + cw/2, y + ch/2 + fontSize/3);
+        if (point.index === optimization.best_index) {
+          ctx.strokeStyle = "#d7191c"; ctx.lineWidth = 3;
+          ctx.strokeRect(x + 2, y + 2, cw - 4, ch - 4);
+        }
+      }
+      ctx.font = "12px system-ui"; ctx.fillStyle = "#18202a"; ctx.textAlign = "center";
+      const xStride = Math.max(1, Math.ceil(xs.length / Math.max(1, w/45)));
+      xs.forEach((value, i) => { if (i % xStride === 0 || i === xs.length - 1)
+        ctx.fillText(String(value), margin.left + (i + 0.5)*cw, margin.top + h + 20); });
+      ctx.fillText("Inner radius [px]", margin.left + w/2, height - 16);
+      ctx.textAlign = "right";
+      const yStride = Math.max(1, Math.ceil(ys.length / Math.max(1, h/22)));
+      ys.forEach((value, i) => { if (i % yStride === 0 || i === ys.length - 1)
+        ctx.fillText(String(value), margin.left - 10, margin.top + (ys.length - i - 0.5)*ch + 4); });
+      ctx.save(); ctx.translate(20, margin.top + h/2); ctx.rotate(-Math.PI/2); ctx.textAlign = "center";
+      ctx.fillText("Outer radius [px]", 0, 0); ctx.restore();
+      const barX = margin.left + w + 20;
+      for (let i = 0; i < 100; i++) {
+        ctx.fillStyle = color(1 - i/99); ctx.fillRect(barX, margin.top + i*h/100, 14, h/100 + 1);
+      }
+      ctx.fillStyle = "#18202a"; ctx.textAlign = "left";
+      ctx.fillText("R", barX, margin.top - 10);
+      ctx.fillText(ratios.length ? max.toExponential(2) : "--", barX + 20, margin.top + 8);
+      ctx.fillText(ratios.length ? min.toExponential(2) : "--", barX + 20, margin.top + h);
+      ctx.restore();
+    }
+
+    function drawRadiusPlot(optimization) {
+      const canvas = els.radiusPlot;
+      resizeCanvas(canvas);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const points = circleRadiusPoints(optimization);
+      if (!points.length) return;
+      const dpr = window.devicePixelRatio || 1;
+      const width = canvas.width / dpr, height = canvas.height / dpr;
+      const margin = {left: 100, right: 30, top: 46, bottom: 60};
+      const w = width - margin.left - margin.right;
+      const h = height - margin.top - margin.bottom;
+      const minRadius = points[0].radius_px, maxRadius = points[points.length - 1].radius_px;
+      const xmin = minRadius === maxRadius ? Math.max(0, minRadius - 0.5) : minRadius;
+      const xmax = minRadius === maxRadius ? maxRadius + 0.5 : maxRadius;
+      const values = points.flatMap(p => [p.planet_pp, p.speckle_pp]).filter(Number.isFinite);
+      const ymax = Math.max(0, ...values) * 1.1 || 1;
+      const xAt = radius => margin.left + (radius - xmin) / (xmax - xmin) * w;
+      const yAt = value => margin.top + (1 - value / ymax) * h;
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.font = "12px system-ui";
+      for (let i = 0; i <= 4; i++) {
+        const x = margin.left + w * i / 4, y = margin.top + h * (1 - i / 4);
+        ctx.strokeStyle = "#d5dbe2";
+        ctx.beginPath(); ctx.moveTo(x, margin.top); ctx.lineTo(x, margin.top + h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + w, y); ctx.stroke();
+        ctx.fillStyle = "#18202a"; ctx.textAlign = "center";
+        ctx.fillText((xmin + (xmax - xmin) * i / 4).toFixed(1), x, margin.top + h + 20);
+        ctx.textAlign = "right";
+        ctx.fillText((ymax * i / 4).toExponential(2), margin.left - 8, y + 4);
+      }
+      const best = points.find(p => p.index === optimization.best_index);
+      if (best) {
+        ctx.strokeStyle = "#666"; ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.moveTo(xAt(best.radius_px), margin.top);
+        ctx.lineTo(xAt(best.radius_px), margin.top + h); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#444"; ctx.textAlign = "right";
+        ctx.fillText(`Best radius: ${best.radius_px} px`, margin.left + w, 20);
+      }
+      for (const [key, label, color, offset] of [
+        ["planet_pp", "Planet PP", "#007f91", 0],
+        ["speckle_pp", "Speckle PP", "#7a3db8", 120],
+      ]) {
+        ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+        ctx.beginPath();
+        let connected = false;
+        for (const point of points) {
+          if (!Number.isFinite(point[key])) { connected = false; continue; }
+          const x = xAt(point.radius_px), y = yAt(point[key]);
+          if (connected) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+          connected = true;
+        }
+        ctx.stroke();
+        for (const point of points) {
+          if (!Number.isFinite(point[key])) continue;
+          ctx.beginPath(); ctx.arc(xAt(point.radius_px), yAt(point[key]), 4, 0, 2 * Math.PI); ctx.fill();
+        }
+        ctx.textAlign = "left"; ctx.fillText(label, margin.left + offset, 20);
+      }
+      ctx.fillStyle = "#18202a"; ctx.textAlign = "left";
+      ctx.fillText("R = Speckle PP / Planet PP", margin.left, 38);
+      for (const point of points) {
+        const values = [point.planet_pp, point.speckle_pp].filter(Number.isFinite);
+        if (!values.length) continue;
+        const ratio = point.ratio_pp === undefined
+          ? (Number.isFinite(point.speckle_pp) && Number.isFinite(point.planet_pp) && point.planet_pp !== 0
+            ? point.speckle_pp / point.planet_pp : null)
+          : point.ratio_pp;
+        const label = `R=${Number.isFinite(ratio) ? ratio.toExponential(2) : "undefined"}`;
+        const x = xAt(point.radius_px);
+        const y = yAt(Math.max(...values)) - 10;
+        ctx.textAlign = x > margin.left + w / 2 ? "right" : "left";
+        ctx.lineWidth = 3; ctx.strokeStyle = "#fff";
+        ctx.strokeText(label, x, y);
+        ctx.fillText(label, x, y);
+      }
+      ctx.fillStyle = "#18202a"; ctx.textAlign = "center";
+      ctx.fillText("Circle radius [px]", margin.left + w / 2, height - 12);
+      ctx.save(); ctx.translate(18, margin.top + h / 2); ctx.rotate(-Math.PI / 2);
+      ctx.fillText("Peak-to-peak Lyot-stop power", 0, 0); ctx.restore();
+      ctx.restore();
     }
 
     function drawTradeoffPlot(optimization) {
@@ -1579,47 +1952,79 @@ HTML = r"""<!doctype html>
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       if (!optimization || !optimization.history || !optimization.history.length) return;
       const points = optimization.history;
-      let xmax = 0, ymax = 0;
-      for (const p of points) {
-        xmax = Math.max(xmax, Number(p.planet_pp) || 0);
-        ymax = Math.max(ymax, Number(p.speckle_pp) || 0);
-      }
-      xmax = xmax || 1;
-      ymax = ymax || 1;
-      const margin = {left: 56, right: 16, top: 18, bottom: 38};
-      const w = canvas.width - margin.left - margin.right;
-      const h = canvas.height - margin.top - margin.bottom;
-      ctx.strokeStyle = "rgba(24,32,42,0.18)";
-      ctx.lineWidth = 1;
+      // Work in CSS pixels so labels stay legible on high-DPI displays.
+      const dpr = window.devicePixelRatio || 1;
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      const width = canvas.width / dpr, height = canvas.height / dpr;
+      const xmax = Math.max(...points.map(p => Number(p.planet_pp) || 0), 0) * 1.12 || 1;
+      const ymax = Math.max(...points.map(p => Number(p.speckle_pp) || 0), 0) * 1.12 || 1;
+      const margin = {left: 96, right: 40, top: 40, bottom: 62};
+      const w = width - margin.left - margin.right;
+      const h = height - margin.top - margin.bottom;
+      ctx.font = "12px system-ui";
       for (let i = 0; i <= 4; i++) {
         const x = margin.left + (i / 4) * w;
-        const y = margin.top + (i / 4) * h;
+        const y = margin.top + (1 - i / 4) * h;
+        ctx.strokeStyle = "rgba(24,32,42,0.18)";
         ctx.beginPath(); ctx.moveTo(x, margin.top); ctx.lineTo(x, margin.top + h); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + w, y); ctx.stroke();
+        ctx.fillStyle = "#18202a";
+        ctx.textAlign = "center";
+        ctx.fillText((xmax * i / 4).toExponential(1), x, margin.top + h + 20);
+        ctx.textAlign = "right";
+        ctx.fillText((ymax * i / 4).toExponential(1), margin.left - 8, y + 4);
       }
-      ctx.strokeStyle = "#18202a";
-      ctx.beginPath();
-      ctx.moveTo(margin.left, margin.top);
-      ctx.lineTo(margin.left, margin.top + h);
-      ctx.lineTo(margin.left + w, margin.top + h);
-      ctx.stroke();
       const pareto = new Set(optimization.pareto_indices || []);
+      const colors = ["#d7191c", "#168245", "#1d70b8"];
+      ctx.textAlign = "left";
+      ["Best score", "Pareto frontier", "Other candidate"].forEach((label, i) => {
+        const x = margin.left + i * (w / 3);
+        ctx.fillStyle = colors[i];
+        ctx.beginPath(); ctx.arc(x, 15, 4, 0, 2 * Math.PI); ctx.fill();
+        ctx.fillStyle = "#18202a"; ctx.fillText(label, x + 9, 19);
+      });
+      const labels = [];
       points.forEach((p, idx) => {
         const x = margin.left + ((Number(p.planet_pp) || 0) / xmax) * w;
         const y = margin.top + (1 - ((Number(p.speckle_pp) || 0) / ymax)) * h;
-        ctx.fillStyle = idx === optimization.best_index ? "#d7191c" : (pareto.has(idx) ? "#168245" : "#1d70b8");
-        ctx.beginPath();
-        ctx.arc(x, y, idx === optimization.best_index ? 6 : 4, 0, 2 * Math.PI);
-        ctx.fill();
+        const best = idx === optimization.best_index;
+        ctx.fillStyle = best ? colors[0] : (pareto.has(idx) ? colors[1] : colors[2]);
+        ctx.beginPath(); ctx.arc(x, y, best ? 6 : 4, 0, 2 * Math.PI); ctx.fill();
+        const label = `C${idx + 1}`;
+        const labelWidth = ctx.measureText(label).width;
+        const lx = Math.min(x + 8, width - labelWidth - 4);
+        let ly = y - 8;
+        while (labels.some(box => Math.abs(box.y - ly) < 14 && lx < box.x + box.w && lx + labelWidth > box.x)) ly += 14;
+        ly = Math.min(ly, margin.top + h - 4);
+        labels.push({x: lx, y: ly, w: labelWidth});
+        ctx.strokeStyle = "#5b6673";
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(lx, ly - 3); ctx.stroke();
+        ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.strokeText(label, lx, ly);
+        ctx.lineWidth = 1; ctx.fillStyle = "#18202a"; ctx.fillText(label, lx, ly);
       });
-      ctx.fillStyle = "#5b6673";
-      ctx.font = `${Math.max(11, Math.round(canvas.width / 62))}px system-ui`;
-      ctx.fillText("planet pp", margin.left + w / 2 - 28, canvas.height - 11);
+      ctx.fillStyle = "#18202a";
+      ctx.textAlign = "center";
+      ctx.fillText("Planet peak-to-peak power modulation (lower preferred)", margin.left + w / 2, height - 14);
       ctx.save();
-      ctx.translate(14, margin.top + h / 2 + 34);
+      ctx.translate(18, margin.top + h / 2);
       ctx.rotate(-Math.PI / 2);
-      ctx.fillText("speckle pp", 0, 0);
+      ctx.fillText("Speckle peak-to-peak power modulation (higher preferred)", 0, 0);
       ctx.restore();
+      ctx.restore();
+      els.tradeoffCandidates.replaceChildren();
+      const table = document.createElement("table");
+      table.innerHTML = "<thead><tr><th>Dot</th><th>Candidate mask</th><th>Planet PP</th><th>Speckle PP</th><th>Status</th></tr></thead>";
+      const body = document.createElement("tbody");
+      points.forEach((p, idx) => {
+        const row = document.createElement("tr");
+        const status = [idx === optimization.best_index ? "Best score" : "", pareto.has(idx) ? "Pareto frontier" : ""].filter(Boolean).join(", ") || "Other candidate";
+        for (const value of [`C${idx + 1}`, p.name, Number(p.planet_pp).toExponential(4), Number(p.speckle_pp).toExponential(4), status]) {
+          const cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell);
+        }
+        body.appendChild(row);
+      });
+      table.appendChild(body); els.tradeoffCandidates.appendChild(table);
     }
 
     async function applyMask() {
@@ -1645,7 +2050,10 @@ HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Propagation failed");
         state.lastResult = data;
+        state.lastProcess = "single";
         state.lastSweep = null;
+        redrawSlm();
+        showResults();
         redrawMaps();
         drawPhasePlot(null);
         renderMetrics(data.metrics);
@@ -1669,7 +2077,8 @@ HTML = r"""<!doctype html>
             phase_steps: Number(els.phaseSteps.value),
             phase_start_rad: Number(els.phaseStartRad.value),
             phase_span_rad: Number(els.phaseSpanRad.value),
-            subtraction_mode: els.subtractionMode.value,
+            comparison_type: els.comparisonType.value || "separate",
+          subtraction_mode: els.subtractionMode.value,
             include_star: document.getElementById("starEnabled").checked,
             include_planet: document.getElementById("planetEnabled").checked,
             include_speckles: document.getElementById("specklesEnabled").checked,
@@ -1682,6 +2091,9 @@ HTML = r"""<!doctype html>
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Phase sweep failed");
         state.lastSweep = data;
+        state.lastProcess = "phase_sweep";
+        redrawSlm();
+        showResults();
         drawPhasePlot(data);
         renderSweepMetrics(data);
         if (data.mask_fraction > 0.99 && data.subtraction_mode === "field") {
@@ -1725,24 +2137,29 @@ HTML = r"""<!doctype html>
         const response = await fetch("/api/comparison", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(Object.assign(commonSweepPayload(), {mode}))
+          body: JSON.stringify(Object.assign(commonSweepPayload(), {mode, comparison_type: mode === "both" ? (els.comparisonType.value || "separate") : "separate"}))
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Comparison failed");
         state.lastComparison = data;
         state.lastComparisonSignature = signature;
         state.lastSweep = null;
-        state.placedMasks = {
-          speckle_position: decodeMaskB64(data.placed_masks.speckle_position),
-          planet_position: decodeMaskB64(data.placed_masks.planet_position),
-        };
+        state.lastProcess = mode === "both" ? "comparison" : `${mode}_comparison`;
+        state.placedMasks = Object.fromEntries(Object.entries(data.placed_masks)
+          .map(([key, mask]) => [key, decodeMaskB64(mask)]));
+        const sharedScale = phasePlotScaleFromSweeps([
+          (data.sweeps.shared_mask || data.sweeps.speckle_position) || null,
+          data.sweeps.planet_position || null
+        ]);
+        showResults();
         redrawSlm();
         drawPhasePlot(null);
-        drawPhasePlotOn(els.speckleSweepPlot, data.sweeps.speckle_position || null);
-        drawPhasePlotOn(els.planetSweepPlot, data.sweeps.planet_position || null);
+        drawPhasePlotOn(els.speckleSweepPlot, (data.sweeps.shared_mask || data.sweeps.speckle_position) || null, sharedScale);
+        drawPhasePlotOn(els.planetSweepPlot, data.sweeps.planet_position || null, sharedScale);
         renderComparisonMetrics(data);
         const complete = data.metrics && data.metrics.complete;
         setStatus(complete ? "Comparison complete. Main metric is peak-to-peak modulation." : "Run stopped. Completed results are kept.");
+        if (els.autoSaveFigures.checked) await saveFigures();
       } catch (err) {
         setStatus(String(err.message || err));
       } finally {
@@ -1750,11 +2167,11 @@ HTML = r"""<!doctype html>
       }
     }
 
-    function drawPhasePlotOn(canvas, sweep) {
+    function drawPhasePlotOn(canvas, sweep, fixedScale) {
       const previous = els.phasePlot;
       els.phasePlot = canvas;
       try {
-        drawPhasePlot(sweep);
+        drawPhasePlot(sweep, fixedScale);
       } finally {
         els.phasePlot = previous;
       }
@@ -1764,32 +2181,63 @@ HTML = r"""<!doctype html>
       setStatus("Optimizing mask...");
       setBusy(true);
       try {
+        const shape = els.tool.value;
+        const shapePayload = shape === "ring" ? {
+          optimization_mode: "ring_radii",
+          circle_center_x: Number(els.centerX.value),
+          circle_center_y: Number(els.centerY.value),
+          ring_inner_radius_min_px: Number(document.getElementById("ringInnerMin").value),
+          ring_inner_radius_max_px: Number(document.getElementById("ringInnerMax").value),
+          ring_outer_radius_min_px: Number(document.getElementById("ringOuterMin").value),
+          ring_outer_radius_max_px: Number(document.getElementById("ringOuterMax").value),
+          ring_inner_radius_step_px: Number(document.getElementById("ringInnerStep").value),
+          ring_outer_radius_step_px: Number(document.getElementById("ringOuterStep").value),
+        } : {
+          optimization_mode: shape === "circle" ? "circle_size" : "pixel_groups",
+          iterations: Number(els.optIterations.value),
+          ...(shape === "circle" ? {
+            circle_center_x: Number(els.centerX.value),
+            circle_center_y: Number(els.centerY.value),
+            circle_radius_min_px: Number(document.getElementById("circleRadiusMin").value),
+            circle_radius_max_px: Number(document.getElementById("circleRadiusMax").value),
+          } : {group_size_px: Number(els.groupSizePx.value), search_radius_px: Number(els.searchRadiusPx.value)}),
+        };
         const response = await fetch("/api/optimize", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(Object.assign(commonSweepPayload(), {
-            optimization_mode: els.tool.value === "circle" ? "circle_size" : "pixel_groups",
-            circle_center_x: Number(els.centerX.value),
-            circle_center_y: Number(els.centerY.value),
-            circle_radius_px: Number(els.radiusPx.value),
-            search_radius_px: Number(els.searchRadiusPx.value),
-            group_size_px: Number(els.groupSizePx.value),
-            iterations: Number(els.optIterations.value),
-            planet_penalty: Number(els.planetPenalty.value)
+          body: JSON.stringify(Object.assign(commonSweepPayload(), shapePayload, {
+            comparison_type: els.comparisonType.value || "separate",
           }))
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Optimization failed");
         state.lastOptimization = data;
-        drawTradeoffPlot(data);
+        state.lastProcess = "optimization";
+        state.lastComparison = null;
+        state.lastComparisonSignature = null;
+        state.placedMasks = null;
         if (data.best_mask_b64) {
           state.undo.push(state.mask.slice());
           state.mask = decodeMaskB64(data.best_mask_b64);
-          commitCurrentMaskAsBase();
-          redrawSlm();
+          state.baseMask = state.mask.slice();
+          state.previewMask = null;
+          if (data.best_comparison) {
+            state.lastComparison = data.best_comparison;
+            state.placedMasks = Object.fromEntries(
+              Object.entries(data.best_comparison.placed_masks)
+                .map(([key, mask]) => [key, decodeMaskB64(mask)])
+            );
+            state.lastComparisonSignature = currentComparisonSignature();
+          }
         }
+        redrawSlm();
+        if (state.lastComparison) renderComparisonSummary(state.lastComparison, "");
+        showResults();
         renderOptimizationMetrics(data);
-        setStatus(data.stopped ? "Optimization stopped. Completed candidates are kept." : "Optimization complete. Best mask was applied to the editor.");
+        setStatus(data.best_mask_b64
+          ? (data.stopped ? "Optimization stopped. Best completed mask placements are shown on the SLM." : "Optimization complete. Best mask placements are shown on the SLM.")
+          : "No valid winning mask was found. The editor mask is unchanged.");
+        if (els.autoSaveFigures.checked) await saveFigures();
       } catch (err) {
         setStatus(String(err.message || err));
       } finally {
@@ -1831,7 +2279,7 @@ HTML = r"""<!doctype html>
         els.applyBtn, els.evaluateModulationBtn, els.runSpeckleSweepBtn,
         els.runPlanetSweepBtn, els.runComparisonBtn, els.optimizeMaskBtn,
         els.clearBtn, els.undoBtn, els.saveMaskBtn, els.loadMaskBtn,
-        els.saveResultBtn, els.saveLogBtn, els.addRegionBtn, els.replaceRegionBtn
+        els.saveResultBtn, els.saveLogBtn, els.saveFiguresBtn, els.addRegionBtn, els.replaceRegionBtn
       ]) {
         button.disabled = Boolean(isBusy);
       }
@@ -1904,6 +2352,7 @@ HTML = r"""<!doctype html>
       return {
         saved_at: new Date().toISOString(),
         gui: "html_slm_gui",
+        process_kind: state.lastProcess || (state.lastOptimization ? "optimization" : (state.lastComparison ? "comparison" : (state.lastSweep ? "phase_sweep" : "single"))),
         n_fft: state.config ? state.config.n_fft : null,
         mask_pixels: state.mask ? maskCount() : 0,
         mask_fraction: state.mask && state.config ? maskCount() / (state.config.n_fft * state.config.n_fft) : 0,
@@ -1920,6 +2369,7 @@ HTML = r"""<!doctype html>
           phase_steps: Number(els.phaseSteps.value),
           phase_start_rad: Number(els.phaseStartRad.value),
           phase_span_rad: Number(els.phaseSpanRad.value),
+          comparison_type: els.comparisonType.value || "separate",
           subtraction_mode: els.subtractionMode.value,
         },
         source_markers: state.config ? state.config.source_markers : [],
@@ -1930,10 +2380,52 @@ HTML = r"""<!doctype html>
       };
     }
 
-    function saveLog() {
+    function figurePayload(singleKey = null) {
+      const figures = {};
+      for (const [key, id, label, available] of figureDefinitions) {
+        const selected = document.querySelector(`input[data-figure="${key}"]`).checked;
+        if (available() && (singleKey ? key === singleKey : selected)) {
+          figures[key] = document.getElementById(id).toDataURL("image/png");
+        }
+      }
+      return figures;
+    }
+
+    async function saveLog() {
       const payload = currentLogPayload();
-      downloadText("interactive_slm_lyot_log.json", JSON.stringify(payload, null, 2));
-      setStatus("Saved log download.");
+      const response = await fetch("/api/save-log", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setStatus(data.error || "Saving log failed.");
+        return;
+      }
+      setStatus(`Saved log to ${data.path}`);
+    }
+
+    async function saveFigures(singleKey = null) {
+      const figures = figurePayload(singleKey);
+      if (!Object.keys(figures).length) {
+        setStatus("No available images selected. Run a calculation or select an image to save.");
+        return;
+      }
+      const response = await fetch("/api/save-figures", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          log: currentLogPayload(),
+          figures
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setStatus(data.error || "Saving figures failed.");
+        return;
+      }
+      setStatus(`Saved ${data.paths.length} figures to ${data.directory}`);
     }
 
     function loadMaskFile(file) {
@@ -1959,10 +2451,9 @@ HTML = r"""<!doctype html>
     async function saveResult() {
       const payload = currentLogPayload();
       payload.mask_b64 = unpackBase64Mask();
-      payload.placed_masks_b64 = state.placedMasks ? {
-        speckle_position: packMask(state.placedMasks.speckle_position),
-        planet_position: packMask(state.placedMasks.planet_position),
-      } : null;
+      payload.placed_masks_b64 = state.placedMasks ? Object.fromEntries(
+        Object.entries(state.placedMasks).map(([key, mask]) => [key, packMask(mask)])
+      ) : null;
       downloadText("interactive_slm_optimization_results.json", JSON.stringify(payload, null, 2));
       if (state.lastResult) {
         const response = await fetch("/api/save-result", {method: "POST"});
@@ -2026,6 +2517,7 @@ HTML = r"""<!doctype html>
         }
         state.circleStart = null;
         state.lastPixel = null;
+        redrawSlm();
       });
       els.applyBtn.addEventListener("click", applyMask);
       els.evaluateModulationBtn.addEventListener("click", evaluateModulation);
@@ -2056,6 +2548,9 @@ HTML = r"""<!doctype html>
       });
       els.saveResultBtn.addEventListener("click", saveResult);
       els.saveLogBtn.addEventListener("click", saveLog);
+      els.saveFiguresBtn.addEventListener("click", () => saveFigures().catch(err => setStatus(err.message)));
+      els.showResultsBtn.addEventListener("click", showResults);
+      document.getElementById("closeResultsBtn").addEventListener("click", () => els.resultsDialog.close());
       els.addSpeckleBtn.addEventListener("click", () => addSpeckleEditorRow(0, 0));
       els.updateSourcesBtn.addEventListener("click", updateSourceGeometry);
       els.addRegionBtn.addEventListener("click", commitPreviewRegion);
@@ -2077,6 +2572,7 @@ HTML = r"""<!doctype html>
         document.getElementById("starPlanetRatio"),
         document.getElementById("starSpeckleRatio"),
         els.matchPhaseZeroPower,
+        els.comparisonType,
         els.targetSpeckle,
         els.phaseSteps,
         els.phaseStartRad,
@@ -2086,16 +2582,23 @@ HTML = r"""<!doctype html>
       ]) {
         input.addEventListener("input", markResultsOutdated);
         input.addEventListener("change", markResultsOutdated);
+        input.addEventListener("change", redrawSlm);
       }
       window.addEventListener("resize", () => {
         redrawSlm();
         redrawMaps();
         drawPhasePlot(state.lastSweep);
         if (state.lastComparison) {
-          drawPhasePlotOn(els.speckleSweepPlot, state.lastComparison.sweeps.speckle_position || null);
-          drawPhasePlotOn(els.planetSweepPlot, state.lastComparison.sweeps.planet_position || null);
+          const sharedScale = phasePlotScaleFromSweeps([
+            (state.lastComparison.sweeps.shared_mask || state.lastComparison.sweeps.speckle_position) || null,
+            state.lastComparison.sweeps.planet_position || null
+          ]);
+          drawPhasePlotOn(els.speckleSweepPlot, (state.lastComparison.sweeps.shared_mask || state.lastComparison.sweeps.speckle_position) || null, sharedScale);
+          drawPhasePlotOn(els.planetSweepPlot, state.lastComparison.sweeps.planet_position || null, sharedScale);
         }
         drawTradeoffPlot(state.lastOptimization);
+        drawRadiusPlot(state.lastOptimization);
+        drawRingPlot(state.lastOptimization);
       });
     }
 
@@ -2108,6 +2611,8 @@ HTML = r"""<!doctype html>
       renderSourceGeometryControls();
       const c = Math.round((state.config.n_fft - 1) / 2);
       setShapeFields(c, c, null, null, null);
+      setupFigureControls();
+      updateFigureControls();
       bindEvents();
       updateShapeParameterVisibility();
       redrawSlm();
@@ -2139,11 +2644,12 @@ def _component_for_display(field: np.ndarray, mode: str) -> np.ndarray:
 
 class _SLMHtmlServer:
     def __init__(self):
-        self.calculator = SLMLyotResponseCalculator()
+        self.calculator = SLMLyotResponseCalculator(default_slm_gui_config())
         self.last_result: dict | None = None
         self.last_comparison: dict | None = None
         self.last_optimization: dict | None = None
         self.last_save_path = Path("interactive_slm_lyot_response_html.npz")
+        self.log_root = Path("interactive_slm_logs")
         self.stop_event = threading.Event()
         self.progress: dict = {"active_run": "idle"}
         center = self.calculator.n_fft // 2
@@ -2151,6 +2657,209 @@ class _SLMHtmlServer:
         row_slice = slice(max(0, center - half_width), min(self.calculator.n_fft, center + half_width + 1))
         col_slice = slice(max(0, center - half_width), min(self.calculator.n_fft, center + half_width + 1))
         self.lyot_view = np.s_[row_slice, col_slice]
+
+    @staticmethod
+    def _safe_token(value: object) -> str:
+        token = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+        return "".join(ch for ch in token if ch.isalnum() or ch == "_") or "run"
+
+    @staticmethod
+    def _coord_token(value: object) -> str:
+        number = float(value)
+        prefix = "m" if number < 0.0 else "p"
+        return prefix + f"{abs(number):.3f}".replace(".", "p")
+
+    def _planet_from_payload(self, payload: dict) -> tuple[float, float]:
+        for marker in payload.get("source_markers", []):
+            if isinstance(marker, dict) and marker.get("kind") == "planet":
+                return float(marker.get("x", 0.0)), float(marker.get("y", 0.0))
+        return self.calculator.config.companion_offset_lamD
+
+    def artifact_directory(self, now: datetime | None = None) -> Path:
+        timestamp = now if now is not None else datetime.now()
+        directory = self.log_root / timestamp.strftime("%Y-%m-%d")
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def artifact_stem(self, payload: dict, now: datetime | None = None) -> str:
+        timestamp = now if now is not None else datetime.now()
+        planet_x, planet_y = self._planet_from_payload(payload)
+        process = self._safe_token(payload.get("process_kind", "run"))
+        return (
+            f"{timestamp.strftime('%H%M%S')}"
+            f"_planet_x_{self._coord_token(planet_x)}"
+            f"_y_{self._coord_token(planet_y)}"
+            f"_{process}"
+        )
+
+    @staticmethod
+    def _compact_json_value(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                str(key): _SLMHtmlServer._compact_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [_SLMHtmlServer._compact_json_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [_SLMHtmlServer._compact_json_value(item) for item in value]
+        if isinstance(value, np.ndarray):
+            return _SLMHtmlServer._compact_json_value(value.tolist())
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            value = float(value)
+        if isinstance(value, float):
+            if not np.isfinite(value):
+                return None
+            return float(f"{value:.12g}")
+        if isinstance(value, (str, int, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _compact_sweep_log(self, sweep: object) -> dict | None:
+        if not isinstance(sweep, dict):
+            return None
+        return self._compact_json_value(
+            {
+                "phase_steps": sweep.get("phase_steps"),
+                "phase_start_rad": sweep.get("phase_start_rad"),
+                "phase_span_rad": sweep.get("phase_span_rad"),
+                "subtraction_mode": sweep.get("subtraction_mode"),
+                "lyot_reference_scale": sweep.get("lyot_reference_scale"),
+                "mask_fraction": sweep.get("mask_fraction"),
+                "phases_rad": sweep.get("phases"),
+                "powers": sweep.get("powers"),
+                "responses": sweep.get("responses"),
+                "metrics": sweep.get("metrics"),
+                "phase_zero_match": sweep.get("phase_zero_match"),
+            }
+        )
+
+    def concise_physics_log_payload(self, payload: dict) -> dict:
+        comparison = payload.get("comparison")
+        concise_comparison = None
+        if isinstance(comparison, dict):
+            concise_comparison = self._compact_json_value(
+                {
+                    "comparison_type": comparison.get("comparison_type", "separate"),
+                    "measurement_plane": comparison.get("measurement_plane"),
+                    "primary_metric": comparison.get("primary_metric"),
+                    "metrics": comparison.get("metrics"),
+                    "phase_zero_match": comparison.get("phase_zero_match"),
+                    "placements": comparison.get("placements"),
+                    "sweeps": {
+                        name: self._compact_sweep_log(sweep)
+                        for name, sweep in comparison.get("sweeps", {}).items()
+                    },
+                }
+            )
+
+        optimization = payload.get("optimization")
+        concise_optimization = None
+        if isinstance(optimization, dict):
+            history = []
+            for item in optimization.get("history", []):
+                if not isinstance(item, dict):
+                    continue
+                history.append(
+                    {
+                        key: item.get(key)
+                        for key in (
+                            "name",
+                            "radius_px",
+                            "inner_radius_px",
+                            "outer_radius_px",
+                            "score",
+                            "speckle_pp",
+                            "planet_pp",
+                            "ratio_pp",
+                            "main_speckle_pp",
+                            "main_planet_pp",
+                        )
+                        if key in item
+                    }
+                )
+            best_index = optimization.get("best_index")
+            best_candidate = None
+            if isinstance(best_index, int) and 0 <= best_index < len(history):
+                best_candidate = history[best_index]
+            concise_optimization = self._compact_json_value(
+                {
+                    "primary_metric": optimization.get("primary_metric"),
+                    "optimization_mode": optimization.get("optimization_mode"),
+                    "comparison_type": optimization.get("comparison_type"),
+                    "ring_grid": optimization.get("ring_grid"),
+                    "search_radius_px": optimization.get("search_radius_px"),
+                    "group_size_px": optimization.get("group_size_px"),
+                    "iterations": optimization.get("iterations"),
+                    "planet_penalty": optimization.get("planet_penalty"),
+                    "random_seed": optimization.get("random_seed"),
+                    "phase_zero_match": optimization.get("phase_zero_match"),
+                    "best_index": best_index,
+                    "best_candidate": best_candidate,
+                    "pareto_indices": optimization.get("pareto_indices"),
+                    "stopped": optimization.get("stopped"),
+                    "history": history,
+                }
+            )
+
+        return self._compact_json_value(
+            {
+                "log_format": "concise_slm_physics_v1",
+                "saved_at": payload.get("saved_at"),
+                "gui": payload.get("gui", "html_slm_gui"),
+                "process_kind": payload.get("process_kind"),
+                "physics_context": {
+                    "system": "SLM phase modulation in a Lyot/coronagraph propagation model",
+                    "coordinates": "source positions are in lambda/D; SLM mask is an n_fft x n_fft focal-plane grid",
+                    "phase_units": "radians",
+                    "power_arrays": "integrated Lyot-stop response versus applied SLM phase",
+                    "coherent_channel": "star plus selected coherent speckles interfere before intensity",
+                    "incoherent_channel": "star and planet intensities are summed without mutual interference",
+                    "reference_subtraction": "field subtraction uses lyot_reference_scale before response metrics",
+                },
+                "setup": {
+                    "n_fft": payload.get("n_fft"),
+                    "mask_pixels": payload.get("mask_pixels"),
+                    "mask_fraction": payload.get("mask_fraction"),
+                    "source_markers": payload.get("source_markers", []),
+                    "controls": payload.get("controls", {}),
+                },
+                "single_phase_metrics": payload.get("single_phase_metrics"),
+                "phase_sweep": self._compact_sweep_log(payload.get("phase_sweep")),
+                "comparison": concise_comparison,
+                "optimization": concise_optimization,
+            }
+        )
+
+    def save_log_payload(self, payload: dict, now: datetime | None = None) -> Path:
+        timestamp = now if now is not None else datetime.now()
+        directory = self.artifact_directory(timestamp)
+        path = directory / f"{self.artifact_stem(payload, timestamp)}_log.json"
+        path.write_text(
+            json.dumps(self.concise_physics_log_payload(payload), indent=2),
+            encoding="utf-8",
+        )
+        return path
+
+    def save_figure_payloads(self, payload: dict, figures: dict, now: datetime | None = None) -> list[Path]:
+        timestamp = now if now is not None else datetime.now()
+        directory = self.artifact_directory(timestamp)
+        stem = self.artifact_stem(payload, timestamp)
+        paths: list[Path] = []
+        if not isinstance(figures, dict):
+            raise ValueError("figures must be an object mapping names to PNG data URLs.")
+        for name, data_url in figures.items():
+            safe_name = self._safe_token(name)
+            encoded = str(data_url)
+            if "," in encoded:
+                encoded = encoded.split(",", 1)[1]
+            image_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+            path = directory / f"{stem}_{safe_name}.png"
+            path.write_bytes(image_bytes)
+            paths.append(path)
+        return paths
 
     def source_markers(self) -> list[dict]:
         markers = [{"label": "star", "x": 0.0, "y": 0.0, "color": "#c28a00", "kind": "star"}]
@@ -2324,15 +3033,17 @@ class _SLMHtmlServer:
         planet_mask: np.ndarray,
     ) -> dict:
         return {
+            "comparison_type": comparison.get("comparison_type", "separate"),
             "measurement_plane": comparison["measurement_plane"],
             "primary_metric": comparison["primary_metric"],
             "metrics": comparison["metrics"],
             "placements": comparison["placements"],
             "phase_zero_match": comparison.get("phase_zero_match"),
-            "placed_masks": {
+            "placed_masks": ({"shared_mask": self.encode_mask(speckle_mask)}
+                             if comparison.get("comparison_type") == "shared_mask" else {
                 "speckle_position": self.encode_mask(speckle_mask),
                 "planet_position": self.encode_mask(planet_mask),
-            },
+            }),
             "sweeps": {
                 name: self.phase_sweep_payload(sweep)
                 for name, sweep in comparison["sweeps"].items()
@@ -2350,11 +3061,33 @@ class _SLMHtmlServer:
             history.append(copied)
         best_index = optimization["best_index"]
         best_mask_b64 = None
+        best_comparison = None
         if best_index is not None and 0 <= best_index < len(optimization["history"]):
-            best_mask_b64 = self.encode_mask(optimization["history"][best_index]["mask"])
+            best = optimization["history"][best_index]
+            best_mask_b64 = self.encode_mask(best["mask"])
+            comparison = best["comparison"]
+            placed_masks = {
+                name: self.encode_mask(sweep["slm_region_mask"])
+                for name, sweep in comparison["sweeps"].items()
+            }
+            best_comparison = {
+                "comparison_type": comparison.get("comparison_type", "separate"),
+                "measurement_plane": comparison["measurement_plane"],
+                "primary_metric": comparison["primary_metric"],
+                "metrics": comparison["metrics"],
+                "placements": comparison["placements"],
+                "phase_zero_match": optimization.get("phase_zero_match"),
+                "placed_masks": placed_masks,
+                "sweeps": {
+                    name: self.phase_sweep_payload(sweep)
+                    for name, sweep in comparison["sweeps"].items()
+                },
+            }
         return {
             "primary_metric": optimization["primary_metric"],
             "optimization_mode": optimization.get("optimization_mode", "pixel_groups"),
+            "comparison_type": optimization.get("comparison_type", "separate"),
+            "ring_grid": optimization.get("ring_grid"),
             "search_radius_px": optimization["search_radius_px"],
             "group_size_px": optimization["group_size_px"],
             "iterations": optimization["iterations"],
@@ -2364,6 +3097,7 @@ class _SLMHtmlServer:
             "history": history,
             "best_index": best_index,
             "best_mask_b64": best_mask_b64,
+            "best_comparison": best_comparison,
             "pareto_indices": optimization["pareto_indices"],
             "stopped": optimization["stopped"],
         }
@@ -2465,6 +3199,32 @@ def make_handler(app: _SLMHtmlServer):
                         payload,
                         (selected_index,),
                     )
+                    comparison_type = str(payload.get("comparison_type", "separate"))
+                    if comparison_type not in {"separate", "shared_mask"}:
+                        raise ValueError("Unknown comparison type.")
+                    if comparison_type == "shared_mask" and payload.get("mode", "both") == "both":
+                        comparison = app.calculator.comparison_sweeps(
+                            template, comparison_type="shared_mask", selected_speckle_index=selected_index,
+                            phase_steps=int(payload.get("phase_steps", 4)),
+                            phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
+                            phase_span_rad=float(payload.get("phase_span_rad", 2.0 * np.pi)),
+                            subtraction_mode=str(payload.get("subtraction_mode", "field")),
+                            include_star=bool(payload.get("include_star", True)),
+                            include_planet=bool(payload.get("include_planet", True)),
+                            include_speckles=bool(payload.get("include_speckles", True)),
+                            star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+                            star_speckle_ratio=star_speckle_ratio,
+                            lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
+                            progress_callback=lambda update: app._progress_callback({"active_run": "shared_mask", **update}),
+                            stop_requested=app._stop_requested,
+                        )
+                        comparison["phase_zero_match"] = phase_zero_match
+                        app.last_comparison = comparison
+                        app._progress_callback({"active_run": "idle", "completed_runs": len(comparison["sweeps"]), "total_runs": 1})
+                        _json_response(self, 200, app.comparison_payload(
+                            comparison, speckle_mask=template, planet_mask=template,
+                        ))
+                        return
                     speckle_placement = app.calculator.place_mask_template(
                         template,
                         speckle_offsets[selected_index],
@@ -2534,20 +3294,27 @@ def make_handler(app: _SLMHtmlServer):
                     )
                     optimization = app.calculator.optimize_common_mask(
                         template,
+                        comparison_type=str(payload.get("comparison_type", "separate")),
                         optimization_mode=str(payload.get("optimization_mode", "pixel_groups")),
+                        ring_inner_radius_min_px=int(payload.get("ring_inner_radius_min_px", 10)),
+                        ring_inner_radius_max_px=int(payload.get("ring_inner_radius_max_px", 30)),
+                        ring_outer_radius_min_px=int(payload.get("ring_outer_radius_min_px", 30)),
+                        ring_outer_radius_max_px=int(payload.get("ring_outer_radius_max_px", 50)),
+                        ring_inner_radius_step_px=int(payload.get("ring_inner_radius_step_px", 5)),
+                        ring_outer_radius_step_px=int(payload.get("ring_outer_radius_step_px", 5)),
                         circle_center_pixel=(
                             int(payload.get("circle_center_x", app.calculator.n_fft // 2)),
                             int(payload.get("circle_center_y", app.calculator.n_fft // 2)),
                         ),
-                        circle_radius_min_px=max(
+                        circle_radius_min_px=int(payload.get("circle_radius_min_px", max(
                             1,
                             int(round(float(payload.get("circle_radius_px", 1.0))))
                             - int(payload.get("search_radius_px", 24)),
-                        ),
-                        circle_radius_max_px=(
+                        ))),
+                        circle_radius_max_px=int(payload.get("circle_radius_max_px", (
                             int(round(float(payload.get("circle_radius_px", 1.0))))
                             + int(payload.get("search_radius_px", 24))
-                        ),
+                        ))),
                         selected_speckle_index=selected_index,
                         phase_steps=int(payload.get("phase_steps", 4)),
                         phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
@@ -2583,6 +3350,25 @@ def make_handler(app: _SLMHtmlServer):
                         return
                     save_slm_lyot_result(app.last_save_path, app.last_result)
                     _json_response(self, 200, {"path": str(app.last_save_path)})
+                    return
+                if path == "/api/save-log":
+                    saved_path = app.save_log_payload(payload)
+                    _json_response(self, 200, {"path": str(saved_path)})
+                    return
+                if path == "/api/save-figures":
+                    log_payload = payload.get("log", {})
+                    figure_paths = app.save_figure_payloads(
+                        log_payload,
+                        payload.get("figures", {}),
+                    )
+                    _json_response(
+                        self,
+                        200,
+                        {
+                            "directory": str(figure_paths[0].parent if figure_paths else app.artifact_directory()),
+                            "paths": [str(path) for path in figure_paths],
+                        },
+                    )
                     return
                 if path == "/api/source-geometry":
                     config = app.update_source_geometry(
