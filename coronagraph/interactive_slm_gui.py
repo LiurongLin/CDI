@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -40,6 +41,50 @@ class SLMLyotConfig:
     perfect_coronagraph: bool = True
 
 
+def default_slm_gui_config() -> SLMLyotConfig:
+    return SLMLyotConfig(
+        companion_offset_lamD=(11.0, 0.0),
+        coherent_ring_speckle_count=1,
+        custom_speckle_offsets_lamD=((-11.0, 0.0),),
+    )
+
+
+def _slm_safe_token(value: object) -> str:
+    token = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    return "".join(ch for ch in token if ch.isalnum() or ch == "_") or "run"
+
+
+def _slm_coord_token(value: object) -> str:
+    number = float(value)
+    prefix = "m" if number < 0.0 else "p"
+    return prefix + f"{abs(number):.3f}".replace(".", "p")
+
+
+def _slm_artifact_directory(now: datetime | None = None) -> Path:
+    timestamp = now if now is not None else datetime.now()
+    directory = Path("interactive_slm_logs") / timestamp.strftime("%Y-%m-%d")
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _slm_artifact_path(
+    *,
+    planet_offset_lamD: tuple[float, float],
+    process_kind: str,
+    suffix: str,
+    now: datetime | None = None,
+) -> Path:
+    timestamp = now if now is not None else datetime.now()
+    px, py = planet_offset_lamD
+    stem = (
+        f"{timestamp.strftime('%H%M%S')}"
+        f"_planet_x_{_slm_coord_token(px)}"
+        f"_y_{_slm_coord_token(py)}"
+        f"_{_slm_safe_token(process_kind)}"
+    )
+    return _slm_artifact_directory(timestamp) / f"{stem}_{suffix}"
+
+
 def _positive_ratio(value: float, name: str) -> float:
     ratio = float(value)
     if ratio <= 0.0:
@@ -48,7 +93,13 @@ def _positive_ratio(value: float, name: str) -> float:
 
 
 class SLMLyotResponseCalculator:
-    """Compute component-wise Lyot-plane response to an arbitrary focal-plane pi mask."""
+    """Compute component-wise Lyot-plane response to a focal-plane phase mask.
+
+    Each source propagates coherently across the whole focal plane: the selected
+    and unselected portions interfere with each other in the Lyot plane. Star
+    and speckles also combine coherently; star and planet combine in intensity.
+    ``include_interference`` controls ghost interference only, not this coherence.
+    """
 
     def __init__(self, config: SLMLyotConfig | None = None):
         self.config = config if config is not None else SLMLyotConfig()
@@ -720,6 +771,7 @@ class SLMLyotResponseCalculator:
         template_mask: np.ndarray,
         *,
         selected_speckle_index: int = 0,
+        comparison_type: str = "separate",
         phase_steps: int = 8,
         phase_start_rad: float = 0.0,
         phase_span_rad: float = 2.0 * np.pi,
@@ -742,6 +794,28 @@ class SLMLyotResponseCalculator:
         selected_indices = (idx,)
         speckle_offset = speckle_offsets[idx]
         planet_offset = self.config.companion_offset_lamD
+
+        if comparison_type not in {"separate", "shared_mask"}:
+            raise ValueError("comparison_type must be separate or shared_mask.")
+        if comparison_type == "shared_mask":
+            # Preserve the editor's absolute pixels, including an off-source center.
+            completed = {}
+            placement = {
+                "mask": np.asarray(template_mask, dtype=bool),
+                "translation_pixels": (0, 0),
+                "selected_pixels": int(np.count_nonzero(template_mask)),
+            }
+            if stop_requested is None or not stop_requested():
+                completed["shared_mask"] = self.phase_sweep(
+                    placement["mask"], phase_steps=phase_steps,
+                    phase_start_rad=phase_start_rad, phase_span_rad=phase_span_rad,
+                    subtraction_mode=subtraction_mode, lyot_reference_scale=lyot_reference_scale,
+                    include_star=include_star, include_planet=include_planet,
+                    include_speckles=include_speckles, selected_speckle_indices=selected_indices,
+                    star_planet_ratio=star_planet_ratio, star_speckle_ratio=star_speckle_ratio,
+                    progress_callback=progress_callback,
+                )
+            return self._comparison_result(completed, placement, placement, comparison_type="shared_mask")
 
         speckle_placement = self.place_mask_template(template_mask, speckle_offset)
         planet_placement = self.place_mask_template(template_mask, planet_offset)
@@ -809,7 +883,14 @@ class SLMLyotResponseCalculator:
         sweeps: dict[str, dict],
         speckle_placement: dict,
         planet_placement: dict,
+        *,
+        comparison_type: str = "separate",
     ) -> dict:
+        original_sweeps = sweeps
+        shared = comparison_type == "shared_mask"
+        if shared:
+            sweeps = ({"speckle_position": sweeps["shared_mask"], "planet_position": sweeps["shared_mask"]}
+                      if "shared_mask" in sweeps else {})
         metrics: dict[str, object] = {"complete": set(sweeps) == {"speckle_position", "planet_position"}}
         if "speckle_position" in sweeps:
             metrics["main_speckle_pp"] = float(
@@ -836,9 +917,10 @@ class SLMLyotResponseCalculator:
         return {
             "measurement_plane": "lyot_stop",
             "primary_metric": "peak_to_peak",
-            "sweeps": sweeps,
+            "comparison_type": comparison_type,
+            "sweeps": original_sweeps,
             "metrics": metrics,
-            "placements": {
+            "placements": ({"shared_mask": {key: value for key, value in speckle_placement.items() if key != "mask"}} if shared else {
                 "speckle_position": {
                     key: value
                     for key, value in speckle_placement.items()
@@ -849,7 +931,7 @@ class SLMLyotResponseCalculator:
                     for key, value in planet_placement.items()
                     if key != "mask"
                 },
-            },
+            }),
         }
 
     def optimize_common_mask(
@@ -857,9 +939,16 @@ class SLMLyotResponseCalculator:
         initial_template_mask: np.ndarray,
         *,
         optimization_mode: str = "pixel_groups",
+        comparison_type: str = "separate",
         circle_center_pixel: tuple[int, int] | None = None,
         circle_radius_min_px: int | None = None,
         circle_radius_max_px: int | None = None,
+        ring_inner_radius_min_px: int = 10,
+        ring_inner_radius_max_px: int = 30,
+        ring_outer_radius_min_px: int = 30,
+        ring_outer_radius_max_px: int = 50,
+        ring_inner_radius_step_px: int = 5,
+        ring_outer_radius_step_px: int = 5,
         selected_speckle_index: int = 0,
         phase_steps: int = 4,
         phase_start_rad: float = 0.0,
@@ -882,9 +971,12 @@ class SLMLyotResponseCalculator:
         template = np.asarray(initial_template_mask, dtype=bool)
         if template.shape != (self.n_fft, self.n_fft):
             raise ValueError(f"SLM template must have shape ({self.n_fft}, {self.n_fft}).")
+        if comparison_type not in {"separate", "shared_mask"}:
+            raise ValueError("comparison_type must be separate or shared_mask.")
         mode = str(optimization_mode).strip().lower().replace("-", "_")
         group = max(1, int(group_size_px))
-        radius = max(group, int(search_radius_px))
+        radius = max(1 if mode in {"circle", "circle_size", "circle_radius", "ring_radii"} else group,
+                     int(search_radius_px))
         n_iter = max(1, int(iterations))
         rng = np.random.default_rng(int(random_seed))
 
@@ -911,6 +1003,7 @@ class SLMLyotResponseCalculator:
             return mask
 
         candidates: list[tuple[str, np.ndarray]]
+        ring_grid = None
         if mode in {"circle", "circle_size", "circle_radius"}:
             if circle_center_pixel is None:
                 circle_center = anchor
@@ -925,11 +1018,13 @@ class SLMLyotResponseCalculator:
             if circle_radius_min_px is None:
                 r_min = max(1, current_radius - radius)
             else:
-                r_min = max(1, int(circle_radius_min_px))
+                r_min = int(circle_radius_min_px)
             if circle_radius_max_px is None:
                 r_max = max(r_min, current_radius + radius)
             else:
-                r_max = max(r_min, int(circle_radius_max_px))
+                r_max = int(circle_radius_max_px)
+            if r_min < 1 or r_max < r_min:
+                raise ValueError("Circle radius range must have 1 <= min radius <= max radius.")
             r_max = min(
                 r_max,
                 circle_center[0],
@@ -950,6 +1045,30 @@ class SLMLyotResponseCalculator:
                     <= int(candidate_radius) ** 2
                 )
                 candidates.append((f"circle_radius_{int(candidate_radius)}px", mask))
+        elif mode == "ring_radii":
+            center = anchor if circle_center_pixel is None else tuple(map(int, circle_center_pixel))
+            inner_min, inner_max = int(ring_inner_radius_min_px), int(ring_inner_radius_max_px)
+            outer_min, outer_max = int(ring_outer_radius_min_px), int(ring_outer_radius_max_px)
+            inner_step = int(ring_inner_radius_step_px)
+            outer_step = int(ring_outer_radius_step_px)
+            if inner_step < 1 or outer_step < 1 or inner_min < 0 or inner_max < inner_min or outer_min < 1 or outer_max < outer_min:
+                raise ValueError("Ring radius ranges must be increasing, nonnegative, with a positive step and outer radius.")
+            boundary = min(center[0], center[1], self.n_fft - 1 - center[0], self.n_fft - 1 - center[1])
+            if outer_max > boundary:
+                raise ValueError("Ring outer radius range clips at the SLM grid boundary.")
+            ring_grid = {"inner_radii_px": list(range(inner_min, inner_max + 1, inner_step)),
+                         "outer_radii_px": list(range(outer_min, outer_max + 1, outer_step))}
+            ring_pairs = [(inner, outer)
+                          for outer in ring_grid["outer_radii_px"]
+                          for inner in ring_grid["inner_radii_px"]
+                          if inner < outer]
+            if not ring_pairs:
+                raise ValueError("Ring search needs at least one inner radius smaller than the outer radius.")
+            yy, xx = np.indices(template.shape)
+            distance2 = (xx - center[0])**2 + (yy - center[1])**2
+            candidates = [(f"ring_inner_{inner}px_outer_{outer}px",
+                           (distance2 >= inner**2) & (distance2 <= outer**2))
+                          for inner, outer in ring_pairs]
         else:
             candidates = [
                 ("empty_reference", np.zeros_like(template, dtype=bool)),
@@ -985,6 +1104,7 @@ class SLMLyotResponseCalculator:
                 )
             comparison = self.comparison_sweeps(
                 mask,
+                comparison_type=comparison_type,
                 selected_speckle_index=selected_speckle_index,
                 phase_steps=phase_steps,
                 phase_start_rad=phase_start_rad,
@@ -1018,6 +1138,10 @@ class SLMLyotResponseCalculator:
                 "mask": mask.copy(),
                 "comparison": comparison,
             }
+            if mode in {"circle", "circle_size", "circle_radius"}:
+                item["radius_px"] = int(radii[idx])
+            elif mode == "ring_radii":
+                item["inner_radius_px"], item["outer_radius_px"] = ring_pairs[idx]
             history.append(item)
             if score > best_score:
                 best_score = float(score)
@@ -1048,6 +1172,8 @@ class SLMLyotResponseCalculator:
         return {
             "primary_metric": "peak_to_peak",
             "optimization_mode": mode,
+            "comparison_type": comparison_type,
+            "ring_grid": ring_grid,
             "search_radius_px": int(radius),
             "group_size_px": int(group),
             "iterations": int(n_iter),
@@ -1182,13 +1308,13 @@ def launch_gui() -> None:
     from matplotlib.ticker import MaxNLocator
     from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider, TextBox
 
-    calculator = SLMLyotResponseCalculator()
+    calculator = SLMLyotResponseCalculator(default_slm_gui_config())
     region = np.zeros((calculator.n_fft, calculator.n_fft), dtype=bool)
     undo_stack: list[np.ndarray] = []
     last_result: dict | None = None
     last_sweep: dict | None = None
     display_mode = {"value": "abs"}
-    drawing_tool = {"value": "freehand"}
+    drawing_tool = {"value": "circle"}
     paint_mode = {"value": "paint"}
     brush_radius = {"value": 5}
     circle_start: tuple[int, int] | None = None
@@ -1279,13 +1405,13 @@ def launch_gui() -> None:
         ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
     ax_checks = fig.add_axes([0.78, 0.76, 0.12, 0.12])
-    source_checks = CheckButtons(ax_checks, ["Star", "Planet", "Speckles"], [True, True, False])
+    source_checks = CheckButtons(ax_checks, ["Star", "Planet", "Speckles"], [True, True, True])
     ax_ratio_planet = fig.add_axes([0.78, 0.69, 0.12, 0.04])
     planet_ratio_box = TextBox(ax_ratio_planet, "Star/Planet", initial="500")
     ax_phase_modulation = fig.add_axes([0.91, 0.69, 0.08, 0.04])
     phase_modulation_box = TextBox(ax_phase_modulation, "Phase", initial=f"{np.pi:.6f}")
     ax_reference_scale = fig.add_axes([0.78, 0.62, 0.08, 0.04])
-    reference_scale_box = TextBox(ax_reference_scale, "Ref %", initial="100")
+    reference_scale_box = TextBox(ax_reference_scale, "Ref %", initial="80")
     ax_ratio_speckle = fig.add_axes([0.78, 0.665, 0.20, 0.018])
     ax_ratio_speckle.axis("off")
     ax_ratio_speckle.text(
@@ -1296,11 +1422,11 @@ def launch_gui() -> None:
         fontsize=8,
     )
     ax_phase_steps = fig.add_axes([0.78, 0.555, 0.08, 0.04])
-    phase_steps_box = TextBox(ax_phase_steps, "Steps", initial="4")
+    phase_steps_box = TextBox(ax_phase_steps, "Steps", initial="6")
     ax_subtraction_mode = fig.add_axes([0.91, 0.555, 0.08, 0.055])
     subtraction_mode_radio = RadioButtons(ax_subtraction_mode, ["field", "intensity"])
     ax_tool = fig.add_axes([0.78, 0.48, 0.12, 0.11])
-    tool_radio = RadioButtons(ax_tool, ["freehand", "circle", "ring", "rect", "sector"])
+    tool_radio = RadioButtons(ax_tool, ["freehand", "circle", "ring", "rect", "sector"], active=1)
     ax_paint_mode = fig.add_axes([0.91, 0.48, 0.08, 0.08])
     paint_mode_radio = RadioButtons(ax_paint_mode, ["paint", "erase"])
     ax_brush = fig.add_axes([0.78, 0.445, 0.20, 0.025])
@@ -1337,6 +1463,7 @@ def launch_gui() -> None:
         ("Save Result", [0.65, 0.04, 0.11, 0.04]),
         ("Eval Mod", [0.78, 0.04, 0.10, 0.04]),
         ("Save Log", [0.90, 0.04, 0.09, 0.04]),
+        ("Save Fig", [0.90, 0.09, 0.09, 0.04]),
     ]
     buttons = {label: Button(fig.add_axes(pos), label) for label, pos in button_specs}
 
@@ -1646,8 +1773,11 @@ def launch_gui() -> None:
 
     def save_current_log(_event=None) -> None:
         states = source_checks.get_status()
+        process_kind = "phase_sweep" if last_sweep is not None else "single"
         payload = {
             "gui": "interactive_slm_gui",
+            "saved_at": datetime.now().isoformat(),
+            "process_kind": process_kind,
             "n_fft": int(calculator.n_fft),
             "mask_pixels": int(np.count_nonzero(region)),
             "mask_fraction": float(np.mean(region)),
@@ -1664,9 +1794,23 @@ def launch_gui() -> None:
             "single_phase_metrics": None if last_result is None else last_result["metrics"],
             "phase_sweep": last_sweep,
         }
-        path = Path("interactive_slm_lyot_log.json")
+        path = _slm_artifact_path(
+            planet_offset_lamD=calculator.config.companion_offset_lamD,
+            process_kind=process_kind,
+            suffix="log.json",
+        )
         path.write_text(json.dumps(_jsonable(payload), indent=2), encoding="utf-8")
         update_results_text(last_result, f"Saved log to {path}")
+
+    def save_current_figure(_event=None) -> None:
+        process_kind = "phase_sweep" if last_sweep is not None else "single"
+        path = _slm_artifact_path(
+            planet_offset_lamD=calculator.config.companion_offset_lamD,
+            process_kind=process_kind,
+            suffix="figure.png",
+        )
+        fig.savefig(path, dpi=180)
+        update_results_text(last_result, f"Saved figure to {path}")
 
     def clear(_event=None) -> None:
         undo_stack.append(region.copy())
@@ -1811,6 +1955,7 @@ def launch_gui() -> None:
     buttons["Load Mask"].on_clicked(load_current_mask)
     buttons["Save Result"].on_clicked(save_current_result)
     buttons["Save Log"].on_clicked(save_current_log)
+    buttons["Save Fig"].on_clicked(save_current_figure)
     tool_radio.on_clicked(set_tool)
     paint_mode_radio.on_clicked(set_paint_mode)
     brush_slider.on_changed(set_brush_radius)
