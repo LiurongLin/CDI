@@ -15,6 +15,8 @@ from .interactive_slm_gui import (
     SLMLyotResponseCalculator,
     default_slm_gui_config,
     save_slm_lyot_result,
+    save_slm_science_result,
+    save_slm_science_comparison,
 )
 
 
@@ -310,6 +312,8 @@ HTML = r"""<!doctype html>
     .results-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
     .figure-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0 14px; }
     .figure-actions label { margin: 0; }
+    #scienceComparisonSummary table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 12px 0; }
+    #scienceComparisonSummary th, #scienceComparisonSummary td { text-align: left; padding: 7px; border-bottom: 1px solid var(--line); }
     #tradeoffCandidates { max-height: 220px; overflow: auto; margin: 12px 0; }
     #tradeoffCandidates table { width: 100%; border-collapse: collapse; font-size: 12px; }
     #tradeoffCandidates th, #tradeoffCandidates td { text-align: left; padding: 6px; border-bottom: 1px solid var(--line); }
@@ -378,6 +382,14 @@ HTML = r"""<!doctype html>
       <div class="control-group run-group">
         <h2>Run</h2>
         <div class="field">
+          <label for="modulationPlane">Modulation measurement plane</label>
+          <select id="modulationPlane">
+            <option value="lyot">Lyot plane</option>
+            <option value="science" selected>Final science plane</option>
+          </select>
+        </div>
+        <button id="measureModulationBtn" class="primary wide">Measure modulation</button>
+        <div class="field">
           <label for="comparisonType">Comparison type</label>
           <select id="comparisonType">
             <option value="separate">Separate masks centered on each source</option>
@@ -395,6 +407,14 @@ HTML = r"""<!doctype html>
         <div id="status" class="status">Ready.</div>
       </div>
 
+      <div class="control-group">
+        <h2>Final science measurement regions</h2>
+        <label for="scienceRadius">Measurement radius [lambda/D]</label>
+        <input id="scienceRadius" type="number" min="0.001" step="0.1" value="0.5" />
+        <button id="scienceScanBtn" class="primary wide">Measure science intensity</button>
+        <div class="axis-note">Uses the Comparison type selected above: separate source-centered scans or one shared-mask scan.</div>
+        <div class="axis-note">Measures every configured speckle and the planet in fixed circles using the current SLM mask, source toggles and ratios, reference %, and phase settings. Includes all light; no background subtraction or phase-0 matching.</div>
+      </div>
       <div class="control-group">
         <h2>Sources</h2>
         <div class="inline-checks">
@@ -423,7 +443,8 @@ HTML = r"""<!doctype html>
             <label for="starSpeckleRatio">Star / speckle</label>
             <input id="starSpeckleRatio" type="number" min="1e-12" step="1" value="100" />
           </div>
-          <label class="checkrow full"><input id="matchPhaseZeroPower" type="checkbox" /> Match phase-0 coherent and incoherent power</label>
+          <label class="checkrow full"><input id="matchPhaseZeroPower" type="checkbox" /> Match phase-0 levels in selected measurement plane</label>
+          <div class="axis-note full">Lyot: match coherent/incoherent power. Science: match total mean intensity in the Target speckle and planet circles at zero SLM phase. Calibrates one common Star/Speckle ratio, fixed for all phases and placements; other speckles are measured independently.</div>
           <div class="field">
             <label>Speckles used</label>
             <div id="speckleSelector" class="axis-note">Speckle list loads with the SLM grid.</div>
@@ -534,7 +555,7 @@ HTML = r"""<!doctype html>
           <div class="axis-note">Test every inner/outer pair in these ranges with inner &lt; outer.</div>
         </div>
         <button class="primary" id="optimizeMaskBtn" style="width:100%;">Start optimization</button>
-        <div class="axis-note">Circles optimize radius; rings optimize inner and outer radii at the selected center. Other masks use pixel groups. Ratio score selects the best candidate.</div>
+        <div class="axis-note">Uses the selected measurement plane and comparison type. Final science scores only s1 (speckle_1) versus the planet: maximize s1 PP / planet PP. All other enabled sources remain present. Measurement radius stays fixed; circle/ring optimization changes only the SLM mask size. Phase-zero matching, if enabled, is calibrated once using s1.</div>
       </div>
 
       <button id="showResultsBtn" disabled>Open results</button>
@@ -608,6 +629,44 @@ HTML = r"""<!doctype html>
       </div>
 
 
+      <div id="planeResultsEmpty" class="status" hidden></div>
+      <section id="optimizationResults" hidden>
+      <h2 id="optimizationTitle">Optimization results</h2>
+      <div id="scienceOptimizationMetrics" class="results" hidden></div>
+      <div id="ringResults" hidden>
+        <div class="map-title">Modulation ratio vs ring radii</div>
+        <div class="plot-canvas" style="height:480px;"><canvas id="ringPlot"></canvas></div>
+        <div class="axis-note">Each tested ring is labeled with R = Speckle PP / Planet PP. Grey cells have an undefined ratio; blank cells were not tested. The best ratio is outlined.</div>
+      </div>
+      <div id="radiusResults" hidden>
+        <div class="map-title">Peak-to-peak modulation vs circle radius</div>
+        <div class="plot-canvas" style="height:380px;"><canvas id="radiusPlot"></canvas></div>
+        <div class="axis-note">Planet and speckle peak-to-peak modulation in the selected measurement plane for each tested circle radius. R labels give speckle PP / planet PP. The dashed line marks the best score.</div>
+      </div>
+      <div class="map-title">Optimization trade-off</div>
+      <div class="plot-canvas" style="height:380px;"><canvas id="tradeoffPlot"></canvas></div>
+      <div class="axis-note">Each dot is a tested mask. Lower planet modulation and higher speckle modulation are preferred. PP means peak-to-peak mean intensity for final science, or integrated power for Lyot. Final science compares only s1 and the planet.</div>
+      <div id="tradeoffCandidates"></div>
+      </section>
+      <section id="scienceResults" hidden>
+        <h2>Final science-plane intensity</h2>
+        <div class="axis-note" id="sciencePhaseZeroMatch" hidden></div>
+        <div id="scienceComparisonControls" hidden>
+          <div class="axis-note">Separate mode scans the mask centered on each source, one placement at a time. Shared mode uses one mask at its current pixels. Select a placement to inspect all region curves; the table compares each source region. All enabled sources remain present.</div>
+          <div id="scienceComparisonSummary" style="overflow:auto;"></div>
+          <h3 id="scienceOverviewTitle">Source-centered modulation comparison</h3>
+          <div class="axis-note" id="scienceOverviewNote"></div>
+          <div class="plot-canvas"><canvas id="scienceOverviewPlot"></canvas></div>
+          <label for="sciencePlacement">Inspect one scan: SLM mask placement</label>
+          <select id="sciencePlacement"></select>
+        </div>
+        <div class="map-title" id="scienceSelectedPlacement"></div>
+        <div class="axis-note" id="scienceImageNote"></div>
+        <div class="map-grid"><div class="map-canvas"><canvas id="scienceMap"></canvas></div>
+        <div><div class="map-title">Mean pixel intensity vs SLM phase [rad] (unit-star direct PSF peak)</div>
+        <div class="plot-canvas"><canvas id="sciencePlot"></canvas></div>
+        <div id="scienceMetrics" class="results"></div></div></div>
+      </section>
       <div id="comparisonSummary" class="comparison-summary" hidden></div>
       <section id="mapResults" hidden>
       <h2>Lyot-plane response</h2>
@@ -633,22 +692,7 @@ HTML = r"""<!doctype html>
           <div class="plot-canvas short"><canvas id="planetSweepPlot"></canvas></div>
         </div>
       </section>
-      <section id="optimizationResults" hidden>
-      <div id="ringResults" hidden>
-        <div class="map-title">Modulation ratio vs ring radii</div>
-        <div class="plot-canvas" style="height:480px;"><canvas id="ringPlot"></canvas></div>
-        <div class="axis-note">Each tested ring is labeled with R = Speckle PP / Planet PP. Grey cells have an undefined ratio; blank cells were not tested. The best ratio is outlined.</div>
-      </div>
-      <div id="radiusResults" hidden>
-        <div class="map-title">Peak-to-peak modulation vs circle radius</div>
-        <div class="plot-canvas" style="height:380px;"><canvas id="radiusPlot"></canvas></div>
-        <div class="axis-note">Planet and speckle peak-to-peak changes in integrated Lyot-stop power for each tested circle radius. R labels give speckle PP / planet PP. The dashed line marks the best score.</div>
-      </div>
-      <div class="map-title">Optimization trade-off</div>
-      <div class="plot-canvas" style="height:380px;"><canvas id="tradeoffPlot"></canvas></div>
-      <div class="axis-note">Each dot is a tested mask. Lower planet modulation and higher speckle modulation are preferred. PP means peak-to-peak change in integrated Lyot-stop power (simulation power units).</div>
-      <div id="tradeoffCandidates"></div>
-      </section>
+
       <div id="metrics" class="results"></div>
       <div id="resultSaveStatus" class="status" role="status"></div>
     </section>
@@ -664,6 +708,9 @@ HTML = r"""<!doctype html>
       dragging: false,
       circleStart: null,
       lastPixel: null,
+      lastScience: null,
+      lastScienceComparison: null,
+      lastScienceSignature: null,
       lastResult: null,
       lastSweep: null,
       lastComparison: null,
@@ -675,6 +722,14 @@ HTML = r"""<!doctype html>
     };
 
     const els = {
+      modulationPlane: document.getElementById("modulationPlane"),
+      measureModulationBtn: document.getElementById("measureModulationBtn"),
+      scienceScanBtn: document.getElementById("scienceScanBtn"),
+      scienceRadius: document.getElementById("scienceRadius"),
+      sciencePlacement: document.getElementById("sciencePlacement"),
+      scienceOverviewPlot: document.getElementById("scienceOverviewPlot"),
+      scienceMap: document.getElementById("scienceMap"),
+      sciencePlot: document.getElementById("sciencePlot"),
       slm: document.getElementById("slmCanvas"),
       status: document.getElementById("status"),
       tool: document.getElementById("tool"),
@@ -749,6 +804,9 @@ HTML = r"""<!doctype html>
     }
 
     const figureDefinitions = [
+      ["science_source_comparison", "scienceOverviewPlot", "Science source-centered modulation comparison", () => Boolean(state.lastScienceComparison)],
+      ["science_intensity_image", "scienceMap", "Science intensity and measurement circles", () => Boolean(state.lastScience)],
+      ["science_intensity_curves", "sciencePlot", "Science mean intensity curves", () => Boolean(state.lastScience)],
       ["slm_mask", "slmCanvas", "SLM mask", () => Boolean(state.config)],
       ["star_map", "starMap", "Star map", () => mapAvailable("star")],
       ["planet_map", "planetMap", "Planet map", () => mapAvailable("planet")],
@@ -768,7 +826,40 @@ HTML = r"""<!doctype html>
         Object.hasOwn(state.lastResult.metrics || {}, `A_${name}`);
     }
 
+    function sciencePlaneSelected() {
+      return els.modulationPlane.value === "science";
+    }
+
+    function optimizationMatchesPlane(opt = state.lastOptimization) {
+      return Boolean(opt) && (opt.measurement_plane === "science") === sciencePlaneSelected();
+    }
+
+    function figureAvailableInSelectedPlane(key, available) {
+      if (key.startsWith("optimization_")) return available() && optimizationMatchesPlane();
+      return available() && (key === "slm_mask" || key.startsWith("science_") === sciencePlaneSelected());
+    }
+
+    function selectedResultProcess() {
+      if (sciencePlaneSelected()) {
+        if (state.lastProcess === "science_optimization" && optimizationMatchesPlane()) return "science_optimization";
+        return state.lastScienceComparison ? "science_comparison" : "science_intensity";
+      }
+      if (state.lastProcess && !state.lastProcess.startsWith("science_")) return state.lastProcess;
+      return state.lastComparison ? "comparison" : state.lastSweep ? "phase_sweep"
+        : state.lastOptimization?.history?.length ? "optimization" : "single";
+    }
+
+    function refreshSelectedPlaneResults() {
+      updateResultVisibility();
+      updateFigureControls();
+      if (els.resultsDialog.open) redrawResults();
+      redrawSlm();
+      const empty = document.getElementById("planeResultsEmpty");
+      setStatus(empty.hidden ? `Showing ${sciencePlaneSelected() ? "final science" : "Lyot"}-plane results.` : empty.textContent);
+    }
+
     function updateResultVisibility() {
+      const science = sciencePlaneSelected();
       const sweeps = state.lastComparison?.sweeps || {};
       const hasComparison = Boolean(sweeps.shared_mask || sweeps.speckle_position || sweeps.planet_position);
       document.getElementById("comparisonSweepTitle").textContent = sweeps.shared_mask
@@ -776,16 +867,26 @@ HTML = r"""<!doctype html>
         : "Speckle-position sweep: power vs phase [rad]";
       const hasMaps = Object.keys(els.maps).some(mapAvailable);
       for (const [id, visible] of [
-        ["mapResults", hasMaps],
-        ["currentPhaseResults", Boolean(state.lastSweep)],
-        ["comparisonResults", hasComparison],
-        ["speckleSweepResults", Boolean(sweeps.shared_mask || sweeps.speckle_position)],
-        ["planetSweepResults", Boolean(sweeps.planet_position)],
-        ["comparisonSummary", hasComparison],
-        ["optimizationResults", Boolean(state.lastOptimization?.history?.length)],
-        ["radiusResults", circleRadiusPoints(state.lastOptimization).length > 0],
-        ["ringResults", ringRadiusPoints(state.lastOptimization).length > 0],
+        ["scienceResults", science && Boolean(state.lastScience)],
+        ["mapResults", !science && hasMaps],
+        ["currentPhaseResults", !science && Boolean(state.lastSweep)],
+        ["comparisonResults", !science && hasComparison],
+        ["speckleSweepResults", !science && Boolean(sweeps.shared_mask || sweeps.speckle_position)],
+        ["planetSweepResults", !science && Boolean(sweeps.planet_position)],
+        ["comparisonSummary", !science && hasComparison],
+        ["optimizationResults", optimizationMatchesPlane() && Boolean(state.lastOptimization?.history?.length)],
+        ["scienceOptimizationMetrics", science && optimizationMatchesPlane() && Boolean(state.lastOptimization?.history?.length)],
+        ["radiusResults", optimizationMatchesPlane() && circleRadiusPoints(state.lastOptimization).length > 0],
+        ["ringResults", optimizationMatchesPlane() && ringRadiusPoints(state.lastOptimization).length > 0],
       ]) document.getElementById(id).hidden = !visible;
+      document.getElementById("optimizationTitle").textContent = science
+        ? "Final science optimization — s1 vs planet" : "Lyot-plane optimization";
+      els.metrics.hidden = science;
+      document.getElementById("resultsTitle").textContent = science ? "Final science-plane results" : "Lyot-plane results";
+      const hasResults = science ? Boolean(state.lastScience || (optimizationMatchesPlane() && state.lastOptimization?.history?.length)) : Boolean(hasMaps || state.lastSweep || hasComparison || (optimizationMatchesPlane() && state.lastOptimization?.history?.length));
+      const empty = document.getElementById("planeResultsEmpty");
+      empty.hidden = hasResults;
+      empty.textContent = hasResults ? "" : `No ${science ? "science" : "Lyot"}-plane results yet. Run a measurement for the selected plane.`;
       for (const [name, canvas] of Object.entries(els.maps)) {
         canvas.closest(".map").hidden = !mapAvailable(name);
       }
@@ -816,24 +917,31 @@ HTML = r"""<!doctype html>
 
     function updateFigureControls() {
       for (const [key, id, label, available] of figureDefinitions) {
-        document.querySelector(`button[data-save-figure="${key}"]`).disabled = !available();
+        document.querySelector(`button[data-save-figure="${key}"]`).disabled = !figureAvailableInSelectedPlane(key, available);
       }
     }
 
     function redrawResults() {
+      if (sciencePlaneSelected()) {
+        drawScienceResults();
+        if (optimizationMatchesPlane()) {
+          drawRadiusPlot(state.lastOptimization); drawRingPlot(state.lastOptimization); drawTradeoffPlot(state.lastOptimization);
+        }
+        return;
+      }
       redrawMaps();
       drawPhasePlot(state.lastSweep);
       const sweeps = state.lastComparison?.sweeps || {};
       const scale = phasePlotScaleFromSweeps([sweeps.shared_mask || sweeps.speckle_position, sweeps.planet_position]);
       drawPhasePlotOn(els.speckleSweepPlot, (sweeps.shared_mask || sweeps.speckle_position) || null, scale);
       drawPhasePlotOn(els.planetSweepPlot, sweeps.planet_position || null, scale);
-      drawRadiusPlot(state.lastOptimization);
-      drawRingPlot(state.lastOptimization);
-      drawTradeoffPlot(state.lastOptimization);
+      if (optimizationMatchesPlane()) {
+        drawRadiusPlot(state.lastOptimization); drawRingPlot(state.lastOptimization); drawTradeoffPlot(state.lastOptimization);
+      }
     }
 
     function showResults() {
-      if (!(state.lastResult || state.lastSweep || state.lastComparison || state.lastOptimization?.history?.length)) return;
+      if (!(state.lastScience || state.lastResult || state.lastSweep || state.lastComparison || state.lastOptimization?.history?.length)) return;
       els.showResultsBtn.disabled = false;
       if (!els.resultsDialog.open) els.resultsDialog.showModal();
       updateResultVisibility();
@@ -1294,7 +1402,12 @@ HTML = r"""<!doctype html>
     }
 
     function displayedSlmMasks() {
-      if ((state.lastProcess?.includes("comparison") || state.lastProcess === "optimization") && state.placedMasks &&
+      if (sciencePlaneSelected() && ["science_comparison", "science_optimization"].includes(state.lastProcess) && state.lastScienceComparison &&
+          state.lastScienceSignature === currentComparisonSignature()) {
+        const encoded = state.lastScienceComparison.placed_masks?.[els.sciencePlacement.value];
+        if (encoded) return [{mask: decodeMaskB64(encoded), color: "rgba(215,25,28,0.92)"}];
+      }
+      if (!sciencePlaneSelected() && (state.lastProcess?.includes("comparison") || state.lastProcess === "optimization") && state.placedMasks &&
           state.lastComparisonSignature === currentComparisonSignature()) {
         const sweeps = state.lastComparison?.sweeps || {};
         const masks = [
@@ -1388,11 +1501,11 @@ HTML = r"""<!doctype html>
       return [grey, grey, grey];
     }
 
-    function drawMap(canvas, payload, sharedScale) {
+    function drawMap(canvas, payload, sharedScale, science = false) {
       resizeCanvas(canvas);
       const ctx = canvas.getContext("2d");
       const [h, w] = payload.shape;
-      const mode = document.getElementById("displayMode").value;
+      const mode = science ? "abs" : document.getElementById("displayMode").value;
       const data = payload.modes ? payload.modes[mode] : payload.values;
       let vmin = sharedScale ? sharedScale.vmin : Infinity;
       let vmax = sharedScale ? sharedScale.vmax : -Infinity;
@@ -1434,7 +1547,7 @@ HTML = r"""<!doctype html>
       drawAxes(ctx, canvas.width, canvas.height, payload.extent, {
         color: "rgba(255,255,255,0.9)",
         gridColor: "rgba(255,255,255,0.16)",
-        label: "pupil D",
+        label: science ? "lambda/D" : "pupil D",
         targetTicks: 4,
         labelBackground: "rgba(0,0,0,0.35)"
       });
@@ -1769,6 +1882,7 @@ HTML = r"""<!doctype html>
     }
 
     function markResultsOutdated() {
+      if (sciencePlaneSelected() && state.lastScienceComparison) setStatus("Settings changed. Run the science comparison again to update results.");
       if (!state.lastComparison) return;
       renderComparisonMetrics(state.lastComparison);
       setStatus("Settings changed. Existing comparison may be outdated.");
@@ -1901,7 +2015,7 @@ HTML = r"""<!doctype html>
       }
       for (const [key, label, color, offset] of [
         ["planet_pp", "Planet PP", "#007f91", 0],
-        ["speckle_pp", "Speckle PP", "#7a3db8", 120],
+        ["speckle_pp", optimization.measurement_plane === "science" ? "s1 PP" : "Speckle PP", "#7a3db8", 120],
       ]) {
         ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
         ctx.beginPath();
@@ -1939,7 +2053,7 @@ HTML = r"""<!doctype html>
       ctx.fillStyle = "#18202a"; ctx.textAlign = "center";
       ctx.fillText("Circle radius [px]", margin.left + w / 2, height - 12);
       ctx.save(); ctx.translate(18, margin.top + h / 2); ctx.rotate(-Math.PI / 2);
-      ctx.fillText("Peak-to-peak Lyot-stop power", 0, 0); ctx.restore();
+      ctx.fillText(optimization.measurement_plane === "science" ? "Peak-to-peak mean intensity" : "Peak-to-peak Lyot-stop power", 0, 0); ctx.restore();
       ctx.restore();
     }
 
@@ -2005,11 +2119,11 @@ HTML = r"""<!doctype html>
       });
       ctx.fillStyle = "#18202a";
       ctx.textAlign = "center";
-      ctx.fillText("Planet peak-to-peak power modulation (lower preferred)", margin.left + w / 2, height - 14);
+      ctx.fillText(optimization.measurement_plane === "science" ? "Planet intensity PP (lower preferred)" : "Planet peak-to-peak power modulation (lower preferred)", margin.left + w / 2, height - 14);
       ctx.save();
       ctx.translate(18, margin.top + h / 2);
       ctx.rotate(-Math.PI / 2);
-      ctx.fillText("Speckle peak-to-peak power modulation (higher preferred)", 0, 0);
+      ctx.fillText(optimization.measurement_plane === "science" ? "s1 intensity PP (higher preferred)" : "Speckle peak-to-peak power modulation (higher preferred)", 0, 0);
       ctx.restore();
       ctx.restore();
       els.tradeoffCandidates.replaceChildren();
@@ -2027,7 +2141,187 @@ HTML = r"""<!doctype html>
       table.appendChild(body); els.tradeoffCandidates.appendChild(table);
     }
 
+    function scienceOverviewData(comparison) {
+      const first = Object.values(comparison.sweeps)[0];
+      const names = Object.keys(comparison.own_region_metrics);
+      return {
+        phases: first.phases, phase_start_rad: first.phase_start_rad, phase_span_rad: first.phase_span_rad,
+        mean_intensities: Object.fromEntries(names.map(name => {
+          const run = comparison.sweeps[comparison.comparison_type === "shared_mask" ? "shared_mask" : name];
+          return [name, run.mean_intensities[name]];
+        })),
+      };
+    }
+
+    function drawScienceOverview() {
+      const comparison = state.lastScienceComparison;
+      if (!comparison) return;
+      const shared = comparison.comparison_type === "shared_mask";
+      document.getElementById("scienceOverviewTitle").textContent = shared
+        ? "All regions with the same shared mask" : "Each source with its own centered mask";
+      document.getElementById("scienceOverviewNote").textContent = shared
+        ? "All curves come from the same scan. Mean physical intensity uses one common normalization."
+        : "Each curve comes from a different scan: speckle curves use their speckle-centered masks; the planet curve uses the planet-centered mask. All enabled light remains present. Mean intensity uses one common normalization.";
+      drawScienceCurves(els.scienceOverviewPlot, scienceOverviewData(comparison));
+    }
+
+    function drawScienceCurves(plot, result) {
+      // A dedicated plot respects arbitrary phase start/span and shows measured samples only.
+      resizeCanvas(plot);
+      const c = plot.getContext("2d"), w = plot.width, h = plot.height;
+      c.clearRect(0, 0, w, h); c.fillStyle = "white"; c.fillRect(0, 0, w, h);
+      const values = Object.values(result.mean_intensities).flat();
+      let lo = Math.min(...values), hi = Math.max(...values);
+      const pad = Math.max((hi - lo) * 0.08, Math.max(Math.abs(hi), 1e-30) * 0.001);
+      lo -= pad; hi += pad;
+      const names = Object.keys(result.mean_intensities);
+      const legendCols = Math.max(1, Math.floor((w - 95) / 140));
+      const left = 95, top = 25 + 20 * Math.ceil(names.length / legendCols);
+      const pw = Math.max(1, w - left - 25), ph = Math.max(1, h - top - 55);
+      const start = result.phase_start_rad, end = start + result.phase_span_rad;
+      c.font = "13px system-ui"; c.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const x = left + pw * i / 4, y = top + ph * i / 4;
+        c.strokeStyle = "#ddd"; c.beginPath(); c.moveTo(left, y); c.lineTo(left + pw, y); c.stroke();
+        c.fillStyle = "#18202a"; c.fillText((hi - (hi - lo) * i / 4).toExponential(3), 2, y + 4);
+        c.fillText((start + (end - start) * i / 4).toFixed(3), x - 15, top + ph + 22);
+      }
+      for (const [idx, name] of names.entries()) {
+        c.strokeStyle = c.fillStyle = `hsl(${idx * 137.5 % 360}, 65%, 35%)`; c.lineWidth = 2;
+        c.fillText(name, left + (idx % legendCols) * 140, 18 + Math.floor(idx / legendCols) * 20); c.beginPath();
+        result.mean_intensities[name].forEach((v, i) => {
+          const x = left + (result.phases[i] - start) / (end - start) * pw;
+          const y = top + (hi - v) / (hi - lo) * ph;
+          if (i) c.lineTo(x, y); else c.moveTo(x, y);
+        }); c.stroke();
+        result.mean_intensities[name].forEach((v, i) => {
+          c.beginPath(); c.arc(left + (result.phases[i] - start) / (end - start) * pw,
+            top + (hi - v) / (hi - lo) * ph, 3, 0, 2 * Math.PI); c.fill();
+        });
+      }
+      c.fillStyle = "#18202a"; c.fillText("SLM phase [rad]", left + pw / 2 - 40, h - 8);
+    }
+
+    function showScienceComparison(comparison) {
+      state.lastScienceComparison = comparison;
+      const host = document.getElementById("scienceComparisonSummary"); host.replaceChildren();
+      const table = document.createElement("table"); table.style.width = "100%";
+      const header = document.createElement("tr");
+      for (const text of ["Source region", "Mask placement", "Maximum mean intensity", "Minimum mean intensity", "Peak-to-peak"]) {
+        const cell = document.createElement("th"); cell.textContent = text; header.appendChild(cell);
+      }
+      table.appendChild(header);
+      for (const [name, metrics] of Object.entries(comparison.own_region_metrics)) {
+        const row = document.createElement("tr");
+        const placement = comparison.comparison_type === "shared_mask" ? "shared mask" : name;
+        for (const value of [name, placement, metrics.maximum.toExponential(6), metrics.minimum.toExponential(6), metrics.peak_to_peak.toExponential(6)]) {
+          const cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell);
+        }
+        table.appendChild(row);
+      }
+      host.appendChild(table);
+      els.sciencePlacement.replaceChildren();
+      for (const name of Object.keys(comparison.sweeps)) {
+        const option = document.createElement("option"); option.value = name;
+        option.textContent = name === "shared_mask" ? "Shared mask at current pixels" : `Mask centered on ${name}`;
+        els.sciencePlacement.appendChild(option);
+      }
+      els.sciencePlacement.value = Object.keys(comparison.sweeps)[0];
+      selectSciencePlacement();
+    }
+
+    function selectSciencePlacement() {
+      if (!state.lastScienceComparison) return;
+      state.lastScience = state.lastScienceComparison.sweeps[els.sciencePlacement.value];
+      drawScienceResults(); redrawSlm();
+    }
+
+    function drawScienceResults() {
+      const result = state.lastScience;
+      if (!result) return;
+      document.getElementById("scienceComparisonControls").hidden = !state.lastScienceComparison;
+      const match = result.phase_zero_match;
+      const matchNote = document.getElementById("sciencePhaseZeroMatch");
+      matchNote.hidden = !match;
+      matchNote.textContent = match
+        ? `Phase-0 matched: ${match.target_region} mean = ${match.speckle_phase_zero_mean_intensity.toExponential(6)}, planet mean = ${match.planet_phase_zero_mean_intensity.toExponential(6)}. Star/Speckle = ${match.star_speckle_ratio.toExponential(6)} (fixed for every phase and placement).`
+        : "";
+      document.getElementById("scienceSelectedPlacement").textContent = state.lastScienceComparison
+        ? `Detailed view of one scan — SLM mask: ${els.sciencePlacement.value}. The overview above compares each source under its own mask.`
+        : "Current SLM mask scan";
+      // Log is a display transform only. The exported means remain physical intensity.
+      const image = result.image;
+      const floor = Math.max(result.display_max * 1e-8, 1e-30);
+      drawMap(els.scienceMap, {...image, values: image.values.map(v => Math.log10(Math.max(v, floor)))},
+        {vmin: Math.log10(floor), vmax: Math.log10(Math.max(result.display_max, floor * 10))}, true);
+      const ctx = els.scienceMap.getContext("2d"), canvas = els.scienceMap;
+      const [xmin, xmax, ymin, ymax] = image.extent;
+      for (const [name, r] of Object.entries(result.regions)) {
+        const x = (r.center_lamD[0] - xmin) / (xmax - xmin) * canvas.width;
+        const y = (r.center_lamD[1] - ymin) / (ymax - ymin) * canvas.height;
+        ctx.strokeStyle = name === "planet" ? "#00e5ff" : "#e6b800";
+        ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(x, y, r.radius_lamD / (xmax - xmin) * canvas.width,
+          r.radius_lamD / (ymax - ymin) * canvas.height, 0, 0, 2 * Math.PI); ctx.stroke();
+        ctx.font = "16px system-ui"; ctx.fillText(name, x + 8, y - 12);
+      }
+      if (state.lastScienceComparison) {
+        ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(5, 5, 250, 24);
+        ctx.fillStyle = "white"; ctx.font = "14px system-ui";
+        ctx.fillText(`SLM mask: ${els.sciencePlacement.value}`, 10, 22);
+      }
+      document.getElementById("scienceImageNote").textContent =
+        `Image at phase ${result.preview_phase_rad.toFixed(4)} rad. Log10 color scale: ${Math.log10(floor).toFixed(2)} to ${Math.log10(Math.max(result.display_max, floor * 10)).toFixed(2)} (one scale across scan). Circles in lambda/D; means include all light. ` +
+        Object.entries(result.regions).map(([name, r]) => `${name}: (${r.center_lamD.join(", ")}), radius ${r.radius_lamD}`).join("; ");
+      drawScienceCurves(els.sciencePlot, result);
+      drawScienceOverview();
+      const host = document.getElementById("scienceMetrics"); host.replaceChildren();
+      for (const [name, metrics] of Object.entries(result.metrics)) {
+        for (const [key, value] of Object.entries(metrics)) {
+          const item = document.createElement("div"); item.className = "metric";
+          const label = document.createElement("span"), number = document.createElement("strong");
+          label.textContent = `${name}: ${key.replaceAll("_", " ")}`;
+          number.textContent = value.toExponential(6); item.append(label, number); host.append(item);
+        }
+      }
+    }
+
+    async function measureSelectedModulation() {
+      if (els.modulationPlane.value === "lyot") return evaluateModulation();
+      return measureScienceIntensity();
+    }
+
+    async function measureScienceIntensity(mode = "both") {
+      els.modulationPlane.value = "science";
+      setBusy(true); els.stopBtn.disabled = true; setStatus("Measuring science-plane intensity...");
+      try {
+        // Capture all settings once; the server freezes both apertures and the SLM mask.
+        const controls = currentLogPayload().controls;
+        const signature = currentComparisonSignature();
+        const response = await fetch("/api/science-intensity", {method: "POST",
+          headers: {"Content-Type": "application/json"}, body: JSON.stringify({...controls,
+            mask_b64: unpackBase64Mask(), radius_lamD: Number(els.scienceRadius.value),
+            measure_all_companions: true,
+            comparison_type: mode === "both" ? (els.comparisonType.value || "separate") : "separate",
+            scan_mode: typeof mode === "string" ? mode : "both",
+            selected_speckle_index: Number(els.targetSpeckle.value || 0),
+            lyot_reference_scale: Number(els.referenceSubtractPercent.value) / 100})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Science scan failed");
+        if (result.sweeps) {
+          state.lastScienceSignature = signature; state.lastProcess = "science_comparison";
+          showScienceComparison(result);
+        } else {
+          state.lastScienceComparison = null; state.lastScience = result; state.lastProcess = "science_intensity";
+        }
+        showResults(); setStatus("Science measurement complete. The summary compares each source's own-region modulation. Save Log / Save results include every placement and every region curve.");
+      } catch (err) { setStatus(String(err.message || err)); }
+      finally { setBusy(false); }
+    }
+
     async function applyMask() {
+      els.modulationPlane.value = "lyot";
       setStatus("Propagating...");
       els.applyBtn.disabled = true;
       try {
@@ -2085,6 +2379,7 @@ HTML = r"""<!doctype html>
             selected_speckle_indices: selectedSpeckleIndices(),
             star_planet_ratio: Number(document.getElementById("starPlanetRatio").value),
             star_speckle_ratio: Number(document.getElementById("starSpeckleRatio").value),
+            match_phase_zero_power: els.matchPhaseZeroPower.checked,
             lyot_reference_scale: Number(els.referenceSubtractPercent.value) / 100
           })
         });
@@ -2129,6 +2424,7 @@ HTML = r"""<!doctype html>
     }
 
     async function runComparison(mode) {
+      if (els.modulationPlane.value === "science") return measureScienceIntensity(mode);
       const labels = {speckle: "Running speckle-position sweep...", planet: "Running planet-position sweep...", both: "Running comparison..."};
       setStatus(labels[mode] || "Running comparison...");
       setBusy(true);
@@ -2178,7 +2474,8 @@ HTML = r"""<!doctype html>
     }
 
     async function optimizeMask() {
-      setStatus("Optimizing mask...");
+      const requestedPlane = sciencePlaneSelected() ? "science" : "lyot";
+      setStatus(`Optimizing ${requestedPlane === "science" ? "final science (s1 / planet)" : "Lyot"} modulation...`);
       setBusy(true);
       try {
         const shape = els.tool.value;
@@ -2206,15 +2503,26 @@ HTML = r"""<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify(Object.assign(commonSweepPayload(), shapePayload, {
+            measurement_plane: requestedPlane,
+            radius_lamD: Number(els.scienceRadius.value),
+            selected_speckle_indices: selectedSpeckleIndices(),
             comparison_type: els.comparisonType.value || "separate",
           }))
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Optimization failed");
+        if ((data.measurement_plane || "lyot") !== requestedPlane) {
+          throw new Error("The server returned optimization for a different measurement plane. Restart the Python GUI server and refresh the browser, then run optimization again.");
+        }
+        els.modulationPlane.value = requestedPlane;
         state.lastOptimization = data;
-        state.lastProcess = "optimization";
-        state.lastComparison = null;
-        state.lastComparisonSignature = null;
+        const science = data.measurement_plane === "science";
+        state.lastProcess = science ? "science_optimization" : "optimization";
+        if (science) {
+          state.lastScienceComparison = null; state.lastScience = null; state.lastScienceSignature = null;
+        } else {
+          state.lastComparison = null; state.lastComparisonSignature = null;
+        }
         state.placedMasks = null;
         if (data.best_mask_b64) {
           state.undo.push(state.mask.slice());
@@ -2222,18 +2530,22 @@ HTML = r"""<!doctype html>
           state.baseMask = state.mask.slice();
           state.previewMask = null;
           if (data.best_comparison) {
-            state.lastComparison = data.best_comparison;
-            state.placedMasks = Object.fromEntries(
-              Object.entries(data.best_comparison.placed_masks)
-                .map(([key, mask]) => [key, decodeMaskB64(mask)])
-            );
-            state.lastComparisonSignature = currentComparisonSignature();
+            if (science) {
+              state.lastScienceSignature = currentComparisonSignature();
+              showScienceComparison(data.best_comparison);
+            } else {
+              state.lastComparison = data.best_comparison;
+              state.placedMasks = Object.fromEntries(Object.entries(data.best_comparison.placed_masks)
+                  .map(([key, mask]) => [key, decodeMaskB64(mask)]));
+              state.lastComparisonSignature = currentComparisonSignature();
+            }
           }
         }
         redrawSlm();
-        if (state.lastComparison) renderComparisonSummary(state.lastComparison, "");
-        showResults();
+        if (!science && state.lastComparison) renderComparisonSummary(state.lastComparison, "");
         renderOptimizationMetrics(data);
+        showResults();
+        els.resultsDialog.scrollTop = 0;
         setStatus(data.best_mask_b64
           ? (data.stopped ? "Optimization stopped. Best completed mask placements are shown on the SLM." : "Optimization complete. Best mask placements are shown on the SLM.")
           : "No valid winning mask was found. The editor mask is unchanged.");
@@ -2246,14 +2558,16 @@ HTML = r"""<!doctype html>
     }
 
     function renderOptimizationMetrics(opt) {
-      els.metrics.innerHTML = "";
+      const metricHost = opt.measurement_plane === "science"
+        ? document.getElementById("scienceOptimizationMetrics") : els.metrics;
+      metricHost.innerHTML = "";
       const best = opt.best_index === null || opt.best_index === undefined ? null : opt.history[opt.best_index];
       const rows = best ? [
         ["Mode", opt.optimization_mode || "pixel_groups"],
         ["Best candidate", best.name],
         ["Best score", Number(best.score).toExponential(6)],
-        ["Speckle pp", Number(best.speckle_pp).toExponential(6)],
-        ["Planet pp", Number(best.planet_pp).toExponential(6)],
+        [opt.measurement_plane === "science" ? "s1 intensity PP" : "Speckle pp", Number(best.speckle_pp).toExponential(6)],
+        [opt.measurement_plane === "science" ? "Planet intensity PP" : "Planet pp", Number(best.planet_pp).toExponential(6)],
         ["Ratio pp", formatRatio(best.ratio_pp)],
         ["Pareto candidates", String((opt.pareto_indices || []).length)],
       ] : [["Best candidate", "none"]];
@@ -2264,19 +2578,22 @@ HTML = r"""<!doctype html>
         const div = document.createElement("div");
         div.className = "metric";
         div.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
-        els.metrics.appendChild(div);
+        metricHost.appendChild(div);
       }
+      // The candidate table below already lists the full science search history.
+      if (opt.measurement_plane === "science") return;
       for (const item of opt.history || []) {
         const div = document.createElement("div");
         div.className = "metric";
-        div.innerHTML = `<span>${item.name}</span><strong>score ${Number(item.score).toExponential(2)}<br>speckle ${Number(item.speckle_pp).toExponential(2)}<br>planet ${Number(item.planet_pp).toExponential(2)}</strong>`;
-        els.metrics.appendChild(div);
+        div.innerHTML = `<span>${item.name}</span><strong>score ${formatRatio(item.score)}<br>speckle ${Number(item.speckle_pp).toExponential(2)}<br>planet ${Number(item.planet_pp).toExponential(2)}</strong>`;
+        metricHost.appendChild(div);
       }
     }
 
     function setBusy(isBusy) {
+      els.modulationPlane.disabled = Boolean(isBusy);
       for (const button of [
-        els.applyBtn, els.evaluateModulationBtn, els.runSpeckleSweepBtn,
+        els.measureModulationBtn, els.scienceScanBtn, els.applyBtn, els.evaluateModulationBtn, els.runSpeckleSweepBtn,
         els.runPlanetSweepBtn, els.runComparisonBtn, els.optimizeMaskBtn,
         els.clearBtn, els.undoBtn, els.saveMaskBtn, els.loadMaskBtn,
         els.saveResultBtn, els.saveLogBtn, els.saveFiguresBtn, els.addRegionBtn, els.replaceRegionBtn
@@ -2352,7 +2669,7 @@ HTML = r"""<!doctype html>
       return {
         saved_at: new Date().toISOString(),
         gui: "html_slm_gui",
-        process_kind: state.lastProcess || (state.lastOptimization ? "optimization" : (state.lastComparison ? "comparison" : (state.lastSweep ? "phase_sweep" : "single"))),
+        process_kind: selectedResultProcess(),
         n_fft: state.config ? state.config.n_fft : null,
         mask_pixels: state.mask ? maskCount() : 0,
         mask_fraction: state.mask && state.config ? maskCount() / (state.config.n_fft * state.config.n_fft) : 0,
@@ -2371,12 +2688,15 @@ HTML = r"""<!doctype html>
           phase_span_rad: Number(els.phaseSpanRad.value),
           comparison_type: els.comparisonType.value || "separate",
           subtraction_mode: els.subtractionMode.value,
+          measurement_plane: els.modulationPlane.value,
         },
         source_markers: state.config ? state.config.source_markers : [],
-        single_phase_metrics: state.lastResult ? state.lastResult.metrics : null,
-        phase_sweep: state.lastSweep,
-        comparison: state.lastComparison,
-        optimization: state.lastOptimization,
+        science_intensity: sciencePlaneSelected() ? state.lastScience : null,
+        science_comparison: sciencePlaneSelected() ? state.lastScienceComparison : null,
+        single_phase_metrics: !sciencePlaneSelected() && state.lastResult ? state.lastResult.metrics : null,
+        phase_sweep: sciencePlaneSelected() ? null : state.lastSweep,
+        comparison: sciencePlaneSelected() ? null : state.lastComparison,
+        optimization: optimizationMatchesPlane() ? state.lastOptimization : null,
       };
     }
 
@@ -2384,8 +2704,10 @@ HTML = r"""<!doctype html>
       const figures = {};
       for (const [key, id, label, available] of figureDefinitions) {
         const selected = document.querySelector(`input[data-figure="${key}"]`).checked;
-        if (available() && (singleKey ? key === singleKey : selected)) {
-          figures[key] = document.getElementById(id).toDataURL("image/png");
+        if (figureAvailableInSelectedPlane(key, available) && (singleKey ? key === singleKey : selected)) {
+          const exportKey = state.lastScienceComparison && key.startsWith("science_intensity_")
+            ? `${key}_${els.sciencePlacement.value}` : key;
+          figures[exportKey] = document.getElementById(id).toDataURL("image/png");
         }
       }
       return figures;
@@ -2454,9 +2776,9 @@ HTML = r"""<!doctype html>
       payload.placed_masks_b64 = state.placedMasks ? Object.fromEntries(
         Object.entries(state.placedMasks).map(([key, mask]) => [key, packMask(mask)])
       ) : null;
-      downloadText("interactive_slm_optimization_results.json", JSON.stringify(payload, null, 2));
-      if (state.lastResult) {
-        const response = await fetch("/api/save-result", {method: "POST"});
+      downloadText(sciencePlaneSelected() ? "interactive_slm_science_intensity_results.json" : "interactive_slm_optimization_results.json", JSON.stringify(payload, null, 2));
+      if ((!sciencePlaneSelected() && state.lastResult) || (sciencePlaneSelected() && (state.lastScience || selectedResultProcess() === "science_optimization"))) {
+        const response = await fetch("/api/save-result", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({process_kind: selectedResultProcess(), source_markers: state.config.source_markers})});
         const data = await response.json();
         setStatus(data.path ? `Downloaded JSON and saved ${data.path}` : "Downloaded JSON results.");
       } else {
@@ -2520,7 +2842,7 @@ HTML = r"""<!doctype html>
         redrawSlm();
       });
       els.applyBtn.addEventListener("click", applyMask);
-      els.evaluateModulationBtn.addEventListener("click", evaluateModulation);
+      els.evaluateModulationBtn.addEventListener("click", measureSelectedModulation);
       els.runSpeckleSweepBtn.addEventListener("click", () => runComparison("speckle"));
       els.runPlanetSweepBtn.addEventListener("click", () => runComparison("planet"));
       els.runComparisonBtn.addEventListener("click", () => runComparison("both"));
@@ -2547,6 +2869,9 @@ HTML = r"""<!doctype html>
         if (file) loadMaskFile(file);
       });
       els.saveResultBtn.addEventListener("click", saveResult);
+      els.measureModulationBtn.addEventListener("click", measureSelectedModulation);
+      els.scienceScanBtn.addEventListener("click", () => measureScienceIntensity());
+      els.sciencePlacement.addEventListener("change", selectSciencePlacement);
       els.saveLogBtn.addEventListener("click", saveLog);
       els.saveFiguresBtn.addEventListener("click", () => saveFigures().catch(err => setStatus(err.message)));
       els.showResultsBtn.addEventListener("click", showResults);
@@ -2565,6 +2890,7 @@ HTML = r"""<!doctype html>
         input.addEventListener("keyup", applyParameterizedShape);
       }
       els.displayMode.addEventListener("change", redrawMaps);
+      els.modulationPlane.addEventListener("change", refreshSelectedPlaneResults);
       for (const input of [
         document.getElementById("starEnabled"),
         document.getElementById("planetEnabled"),
@@ -2586,19 +2912,7 @@ HTML = r"""<!doctype html>
       }
       window.addEventListener("resize", () => {
         redrawSlm();
-        redrawMaps();
-        drawPhasePlot(state.lastSweep);
-        if (state.lastComparison) {
-          const sharedScale = phasePlotScaleFromSweeps([
-            (state.lastComparison.sweeps.shared_mask || state.lastComparison.sweeps.speckle_position) || null,
-            state.lastComparison.sweeps.planet_position || null
-          ]);
-          drawPhasePlotOn(els.speckleSweepPlot, (state.lastComparison.sweeps.shared_mask || state.lastComparison.sweeps.speckle_position) || null, sharedScale);
-          drawPhasePlotOn(els.planetSweepPlot, state.lastComparison.sweeps.planet_position || null, sharedScale);
-        }
-        drawTradeoffPlot(state.lastOptimization);
-        drawRadiusPlot(state.lastOptimization);
-        drawRingPlot(state.lastOptimization);
+        redrawResults();
       });
     }
 
@@ -2645,6 +2959,8 @@ def _component_for_display(field: np.ndarray, mode: str) -> np.ndarray:
 class _SLMHtmlServer:
     def __init__(self):
         self.calculator = SLMLyotResponseCalculator(default_slm_gui_config())
+        self.last_science: dict | None = None
+        self.last_science_comparison: dict | None = None
         self.last_result: dict | None = None
         self.last_comparison: dict | None = None
         self.last_optimization: dict | None = None
@@ -2786,6 +3102,12 @@ class _SLMHtmlServer:
                 best_candidate = history[best_index]
             concise_optimization = self._compact_json_value(
                 {
+                    "measurement_plane": optimization.get("measurement_plane", "lyot"),
+                    "scored_regions": optimization.get("scored_regions"),
+                    "science_radius_lamD": optimization.get("science_radius_lamD"),
+                    "star_planet_ratio": optimization.get("star_planet_ratio"),
+                    "star_speckle_ratio": optimization.get("star_speckle_ratio"),
+                    "selected_speckle_indices": optimization.get("selected_speckle_indices"),
                     "primary_metric": optimization.get("primary_metric"),
                     "optimization_mode": optimization.get("optimization_mode"),
                     "comparison_type": optimization.get("comparison_type"),
@@ -2826,6 +3148,11 @@ class _SLMHtmlServer:
                     "source_markers": payload.get("source_markers", []),
                     "controls": payload.get("controls", {}),
                 },
+                "science_intensity": {
+                    k: v for k, v in (payload.get("science_intensity") or {}).items()
+                    if k != "image"
+                } or None,
+                "science_comparison": self.compact_science_comparison_log(payload.get("science_comparison")),
                 "single_phase_metrics": payload.get("single_phase_metrics"),
                 "phase_sweep": self._compact_sweep_log(payload.get("phase_sweep")),
                 "comparison": concise_comparison,
@@ -2948,6 +3275,21 @@ class _SLMHtmlServer:
     def _stop_requested(self) -> bool:
         return self.stop_event.is_set()
 
+    def calibrated_science_ratio(self, payload: dict, target_index: int | None = None) -> tuple[float, dict | None]:
+        ratio = float(payload.get("star_speckle_ratio", 100.0))
+        if not bool(payload.get("match_phase_zero_power", False)):
+            return ratio, None
+        match = self.calculator.calibrate_science_phase_zero_intensity(
+            selected_speckle_index=int(payload.get("selected_speckle_index", 0)) if target_index is None else target_index,
+            radius_lamD=float(payload.get("radius_lamD", 0.5)),
+            include_star=bool(payload.get("include_star", True)),
+            include_planet=bool(payload.get("include_planet", True)),
+            include_speckles=bool(payload.get("include_speckles", True)),
+            selected_speckle_indices=payload.get("selected_speckle_indices"),
+            star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+            star_speckle_ratio=ratio, lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)))
+        return match["star_speckle_ratio"], match
+
     def calibrated_star_speckle_ratio(self, payload: dict, selected_indices: object) -> tuple[float, dict | None]:
         base_ratio = float(payload.get("star_speckle_ratio", 100.0))
         if not bool(payload.get("match_phase_zero_power", False)):
@@ -2994,6 +3336,39 @@ class _SLMHtmlServer:
                 "extent": extent,
             }
         return maps
+
+    @staticmethod
+    def compact_science_comparison_log(comparison: object) -> dict | None:
+        if not isinstance(comparison, dict):
+            return None
+        return {**{k: v for k, v in comparison.items() if k not in {"sweeps", "placed_masks"}},
+                "sweeps": {name: {k: v for k, v in run.items() if k != "image"}
+                           for name, run in comparison.get("sweeps", {}).items()}}
+
+    def science_comparison_payload(self, comparison: dict) -> dict:
+        common_max = max(run["display_max"] for run in comparison["sweeps"].values())
+        payload = {k: v for k, v in comparison.items() if k not in {"sweeps", "slm_template_mask"}}
+        payload["sweeps"] = {name: {**self.science_intensity_payload(run), "display_max": common_max}
+                             for name, run in comparison["sweeps"].items()}
+        payload["placed_masks"] = {name: self.encode_mask(run["slm_region_mask"])
+                                  for name, run in comparison["sweeps"].items()}
+        return self._compact_json_value(payload)
+
+    def science_intensity_payload(self, result: dict) -> dict:
+        calc = self.calculator
+        # Crop only the preview; aperture means are computed on the full science grid.
+        centers = [r["center_lamD"] for r in result["regions"].values()]
+        half = max(abs(v) for center in centers for v in center) + max(
+            r["radius_lamD"] for r in result["regions"].values()) + 2.0
+        axis = calc.x_lamD[0]
+        indices = np.flatnonzero(np.abs(axis) <= half)
+        a, b = int(indices[0]), int(indices[-1]) + 1
+        image = result["preview_intensity"][a:b, a:b]
+        extent = [float(axis[a] - 0.5 / calc.focal_sampling),
+                  float(axis[b - 1] + 0.5 / calc.focal_sampling)] * 2
+        payload = {k: v for k, v in result.items() if k not in {"preview_intensity", "slm_region_mask"}}
+        payload["image"] = {"shape": list(image.shape), "values": image.ravel().tolist(), "extent": extent}
+        return self._compact_json_value(payload)
 
     def phase_sweep_payload(self, sweep: dict) -> dict:
         metrics = {}
@@ -3070,20 +3445,30 @@ class _SLMHtmlServer:
                 name: self.encode_mask(sweep["slm_region_mask"])
                 for name, sweep in comparison["sweeps"].items()
             }
-            best_comparison = {
-                "comparison_type": comparison.get("comparison_type", "separate"),
-                "measurement_plane": comparison["measurement_plane"],
-                "primary_metric": comparison["primary_metric"],
-                "metrics": comparison["metrics"],
-                "placements": comparison["placements"],
-                "phase_zero_match": optimization.get("phase_zero_match"),
-                "placed_masks": placed_masks,
-                "sweeps": {
-                    name: self.phase_sweep_payload(sweep)
-                    for name, sweep in comparison["sweeps"].items()
-                },
-            }
-        return {
+            if optimization.get("measurement_plane") == "science":
+                best_comparison = self.science_comparison_payload(comparison)
+            else:
+                best_comparison = {
+                    "comparison_type": comparison.get("comparison_type", "separate"),
+                    "measurement_plane": comparison["measurement_plane"],
+                    "primary_metric": comparison["primary_metric"],
+                    "metrics": comparison["metrics"],
+                    "placements": comparison["placements"],
+                    "phase_zero_match": optimization.get("phase_zero_match"),
+                    "placed_masks": placed_masks,
+                    "sweeps": {
+                        name: self.phase_sweep_payload(sweep)
+                        for name, sweep in comparison["sweeps"].items()
+                    },
+                }
+
+        return self._compact_json_value({
+            "measurement_plane": optimization.get("measurement_plane", "lyot"),
+            "scored_regions": optimization.get("scored_regions"),
+            "science_radius_lamD": optimization.get("science_radius_lamD"),
+            "star_speckle_ratio": optimization.get("star_speckle_ratio"),
+            "star_planet_ratio": optimization.get("star_planet_ratio"),
+            "selected_speckle_indices": optimization.get("selected_speckle_indices"),
             "primary_metric": optimization["primary_metric"],
             "optimization_mode": optimization.get("optimization_mode", "pixel_groups"),
             "comparison_type": optimization.get("comparison_type", "separate"),
@@ -3100,7 +3485,7 @@ class _SLMHtmlServer:
             "best_comparison": best_comparison,
             "pareto_indices": optimization["pareto_indices"],
             "stopped": optimization["stopped"],
-        }
+        })
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -3123,6 +3508,7 @@ def make_handler(app: _SLMHtmlServer):
                 body = HTML.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -3137,6 +3523,64 @@ def make_handler(app: _SLMHtmlServer):
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                if path == "/api/science-intensity":
+                    mask = app.decode_mask(str(payload["mask_b64"]))
+                    if bool(payload.get("match_phase_zero_power", False)):
+                        app._progress_callback({"active_run": "science_phase_zero_matching"})
+                    ratio, science_match = app.calibrated_science_ratio(payload)
+                    payload["star_speckle_ratio"] = ratio
+                    if payload.get("comparison_type") in {"separate", "shared_mask"}:
+                        scan_mode = str(payload.get("scan_mode", "both"))
+                        if scan_mode not in {"both", "speckle", "planet"}:
+                            raise ValueError("Unknown science scan mode.")
+                        names = None
+                        if scan_mode == "planet":
+                            names = ["planet"]
+                        elif scan_mode == "speckle":
+                            names = [f"speckle_{int(payload.get('selected_speckle_index', 0)) + 1}"]
+                        comparison = app.calculator.science_comparison_sweeps(mask,
+                            comparison_type=str(payload["comparison_type"]), source_names=names,
+                            radius_lamD=float(payload.get("radius_lamD", 0.5)),
+                            phase_steps=int(payload.get("phase_steps", 16)),
+                            phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
+                            phase_span_rad=float(payload.get("phase_span_rad", 2 * np.pi)),
+                            include_star=bool(payload.get("include_star", True)),
+                            include_planet=bool(payload.get("include_planet", True)),
+                            include_speckles=bool(payload.get("include_speckles", True)),
+                            selected_speckle_indices=payload.get("selected_speckle_indices"),
+                            star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+                            star_speckle_ratio=float(payload.get("star_speckle_ratio", 100.0)),
+                            lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
+                            progress_callback=app._progress_callback)
+                        comparison["phase_zero_match"] = science_match
+                        for run in comparison["sweeps"].values():
+                            run["phase_zero_match"] = science_match
+                        app.last_science_comparison = comparison
+                        app.last_science = next(iter(comparison["sweeps"].values()))
+                        app._progress_callback({"active_run": "idle", "completed_runs": len(comparison["sweeps"])})
+                        _json_response(self, 200, app.science_comparison_payload(comparison))
+                        return
+                    result = app.calculator.science_intensity_sweep(mask,
+                        radius_lamD=float(payload.get("radius_lamD", 0.5)),
+                        selected_speckle_index=int(payload.get("selected_speckle_index", 0)),
+                        measure_all_companions=bool(payload.get("measure_all_companions", False)),
+                        phase_steps=int(payload.get("phase_steps", 16)),
+                        phase_start_rad=float(payload.get("phase_start_rad", 0.0)),
+                        phase_span_rad=float(payload.get("phase_span_rad", 2 * np.pi)),
+                        include_star=bool(payload.get("include_star", True)),
+                        include_planet=bool(payload.get("include_planet", True)),
+                        include_speckles=bool(payload.get("include_speckles", True)),
+                        selected_speckle_indices=payload.get("selected_speckle_indices"),
+                        star_planet_ratio=float(payload.get("star_planet_ratio", 500.0)),
+                        star_speckle_ratio=float(payload.get("star_speckle_ratio", 100.0)),
+                        lyot_reference_scale=float(payload.get("lyot_reference_scale", 1.0)),
+                        progress_callback=lambda update: app._progress_callback(
+                            {"active_run": "science_intensity", **update}))
+                    result["phase_zero_match"] = science_match
+                    app.last_science_comparison = None
+                    app.last_science = result
+                    _json_response(self, 200, app.science_intensity_payload(result))
+                    return
                 if path == "/api/propagate":
                     mask = app.decode_mask(str(payload["mask_b64"]))
                     result = app.calculator.propagate(
@@ -3287,13 +3731,16 @@ def make_handler(app: _SLMHtmlServer):
                 if path == "/api/optimize":
                     app.stop_event.clear()
                     template = app.decode_mask(str(payload["mask_b64"]))
-                    selected_index = int(payload.get("selected_speckle_index", 0))
-                    star_speckle_ratio, phase_zero_match = app.calibrated_star_speckle_ratio(
-                        payload,
-                        (selected_index,),
-                    )
+                    plane = str(payload.get("measurement_plane", "lyot"))
+                    selected_index = 0 if plane == "science" else int(payload.get("selected_speckle_index", 0))
+                    if plane == "science":
+                        star_speckle_ratio, phase_zero_match = app.calibrated_science_ratio(payload, target_index=0)
+                    else:
+                        star_speckle_ratio, phase_zero_match = app.calibrated_star_speckle_ratio(payload, (selected_index,))
                     optimization = app.calculator.optimize_common_mask(
                         template,
+                        measurement_plane=plane, science_radius_lamD=float(payload.get("radius_lamD", 0.5)),
+                        selected_speckle_indices=payload.get("selected_speckle_indices"),
                         comparison_type=str(payload.get("comparison_type", "separate")),
                         optimization_mode=str(payload.get("optimization_mode", "pixel_groups")),
                         ring_inner_radius_min_px=int(payload.get("ring_inner_radius_min_px", 10)),
@@ -3334,6 +3781,14 @@ def make_handler(app: _SLMHtmlServer):
                         stop_requested=app._stop_requested,
                     )
                     optimization["phase_zero_match"] = phase_zero_match
+                    if plane == "science":
+                        for candidate in optimization["history"]:
+                            candidate["comparison"]["phase_zero_match"] = phase_zero_match
+                            for run in candidate["comparison"]["sweeps"].values():
+                                run["phase_zero_match"] = phase_zero_match
+                        if optimization["best_index"] is not None:
+                            app.last_science_comparison = optimization["history"][optimization["best_index"]]["comparison"]
+                            app.last_science = next(iter(app.last_science_comparison["sweeps"].values()))
                     app.last_optimization = optimization
                     _json_response(self, 200, app.optimization_payload(optimization))
                     return
@@ -3345,6 +3800,34 @@ def make_handler(app: _SLMHtmlServer):
                     _json_response(self, 200, app.progress)
                     return
                 if path == "/api/save-result":
+                    if payload.get("process_kind") == "science_optimization":
+                        opt = app.last_optimization
+                        if not opt or opt.get("measurement_plane") != "science" or opt["best_index"] is None:
+                            raise ValueError("No winning science optimization to save.")
+                        path = app.artifact_directory() / (app.artifact_stem(payload) + "_result.npz")
+                        save_slm_science_comparison(path, opt["history"][opt["best_index"]]["comparison"])
+                        with np.load(path, allow_pickle=False) as saved:
+                            arrays = {name: saved[name] for name in saved.files}
+                        arrays["optimization_json"] = json.dumps(app.optimization_payload(opt))
+                        np.savez_compressed(path, **arrays)
+                        _json_response(self, 200, {"path": str(path)})
+                        return
+                    if payload.get("process_kind") == "science_comparison":
+                        if app.last_science_comparison is None:
+                            raise ValueError("No science comparison to save.")
+                        path = app.artifact_directory() / (app.artifact_stem(payload) + "_result.npz")
+                        save_slm_science_comparison(path, app.last_science_comparison)
+                        _json_response(self, 200, {"path": str(path)})
+                        return
+                    if payload.get("process_kind") == "science_intensity":
+                        if app.last_science is None:
+                            _json_response(self, 400, {"error": "No science measurement to save."})
+                            return
+                        result = app.last_science
+                        path = app.artifact_directory() / (app.artifact_stem(payload) + "_result.npz")
+                        save_slm_science_result(path, result)
+                        _json_response(self, 200, {"path": str(path)})
+                        return
                     if app.last_result is None:
                         _json_response(self, 400, {"error": "No propagation result to save."})
                         return
