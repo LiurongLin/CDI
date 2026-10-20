@@ -529,6 +529,266 @@ class SLMLyotResponseCalculator:
             "include_speckles": bool(include_speckles),
         }
 
+    def science_intensity_sweep(
+        self, slm_region_mask: np.ndarray, *, radius_lamD: float = 0.5,
+        selected_speckle_index: int = 0, phase_steps: int = 16,
+        measurement_plane: str = "science", measure_all_companions: bool = False,
+        measurement_region_names: list[str] | None = None,
+        phase_start_rad: float = 0.0, phase_span_rad: float = 2.0 * np.pi,
+        include_star: bool = True, include_planet: bool = True,
+        include_speckles: bool = True, selected_speckle_indices=None,
+        star_planet_ratio: float = 500.0, star_speckle_ratio: float = 100.0,
+        lyot_reference_scale: float | None = None,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> dict:
+        """Measure total physical intensity in fixed circular source apertures.
+
+        The simulator supplies the stopped science fields and ghost fields.
+        Star and speckles add as fields; the planet adds as intensity. No
+        star-only or phase-zero intensity is removed from either aperture.
+        """
+        region = np.array(slm_region_mask, dtype=bool, copy=True)
+        if region.shape != (self.n_fft, self.n_fft):
+            raise ValueError("SLM mask has the wrong shape.")
+        radius = float(radius_lamD)
+        if not np.isfinite(radius) or radius <= 0:
+            raise ValueError("Measurement radius must be finite and > 0 lambda/D.")
+        offsets = self._speckle_offsets()
+        plane = str(measurement_plane).strip().lower()
+        if plane not in {"focal", "science"}:
+            raise ValueError("measurement_plane must be 'focal' or 'science'.")
+        target = int(selected_speckle_index)
+        if not measure_all_companions and (target < 0 or target >= len(offsets)):
+            raise ValueError("Select an existing target speckle for measurement.")
+        n = int(phase_steps)
+        start, span = float(phase_start_rad), float(phase_span_rad)
+        if n < 2 or not np.isfinite(start) or not np.isfinite(span) or span <= 0:
+            raise ValueError("Use at least 2 phases and a finite positive phase span.")
+        ratios = [_positive_ratio(star_planet_ratio, "star_planet_ratio"),
+                  _positive_ratio(star_speckle_ratio, "star_speckle_ratio")]
+        if not np.all(np.isfinite(ratios)):
+            raise ValueError("Source ratios must be finite.")
+        scale = self.config.lyot_reference_scale if lyot_reference_scale is None else float(lyot_reference_scale)
+        if not np.isfinite(scale) or scale < 0:
+            raise ValueError("Reference scale must be finite and nonnegative.")
+        centers = (
+            {f"speckle_{i + 1}": offset for i, offset in enumerate(offsets)}
+            if measure_all_companions else {"speckle": offsets[target]}
+        )
+        centers["planet"] = self.config.companion_offset_lamD
+        if measurement_region_names is not None:
+            if not measurement_region_names or any(name not in centers for name in measurement_region_names):
+                raise ValueError("Choose existing science measurement regions.")
+            centers = {name: centers[name] for name in measurement_region_names}
+        masks, regions = {}, {}
+        for name, (x, y) in centers.items():
+            if (x - radius < self.x_lamD.min() or x + radius > self.x_lamD.max()
+                    or y - radius < self.y_lamD.min() or y + radius > self.y_lamD.max()):
+                raise ValueError(f"{name} measurement circle crosses the science image boundary.")
+            mask = (self.x_lamD - x)**2 + (self.y_lamD - y)**2 <= radius**2
+            if not np.any(mask):
+                raise ValueError(f"{name} measurement circle contains no pixel centers; increase its radius.")
+            masks[name] = mask
+            regions[name] = {"center_lamD": [float(x), float(y)], "radius_lamD": radius,
+                             "pixel_count": int(mask.sum())}
+        # One unit-star direct PSF peak, independent of phase and source toggles.
+        norm = float(self._template._run_single_branch(
+            apply_focal_plane_modulation=False)["normalization_peak"])
+        selected = set(range(len(offsets))) if selected_speckle_indices is None else {int(i) for i in selected_speckle_indices}
+        phases = start + span * np.arange(n) / n
+        curves = {name: np.zeros(n) for name in masks}
+        preview = None
+        display_max = 0.0
+        field_key = "coronagraphic_field" if plane == "science" else "focal_plane_field_after_mask"
+        for i, phase in enumerate(phases):
+            if progress_callback is not None:
+                progress_callback({"phase_index": i + 1, "phase_count": n, "phase_rad": float(phase)})
+            sim = self._make_simulator(np.where(region, phase, 0.0), lyot_reference_scale=scale)
+            reference = self._reference_field(sim, apply_focal_plane_modulation=True) if include_star else None
+            coherent = np.zeros(region.shape, dtype=complex)
+            ghost = np.zeros_like(coherent)
+            if include_star:
+                branch = sim._run_single_branch(normalization_peak=norm, lyot_reference_field=reference)
+                coherent += branch[field_key]
+                ghost += branch["ghost_field"] if plane == "science" else 0
+            # Preserve the simulator's companion/speckle ghost switch.
+            sim.include_ghost = self.config.include_ghost and self.config.include_companion_ghost
+            if include_speckles:
+                for j, offset in enumerate(offsets):
+                    if j not in selected:
+                        continue
+                    shift = tuple(self.config.focal_shift_pixels[k] - offset[k] * self.focal_sampling for k in (0, 1))
+                    branch = sim._run_single_branch(focal_shift_pixels=shift,
+                        source_amplitude=1 / np.sqrt(ratios[1]), normalization_peak=norm)
+                    coherent += branch[field_key]
+                    ghost += branch["ghost_field"] if plane == "science" else 0
+            intensity = np.abs(coherent)**2 + np.abs(ghost)**2
+            if plane == "science" and self.config.include_ghost and self.config.include_interference:
+                intensity += 2 * np.real(self.config.ghost_coherence * coherent * np.conj(ghost))
+            if include_planet:
+                shift = tuple(self.config.focal_shift_pixels[k] - self.config.companion_offset_lamD[k] * self.focal_sampling for k in (0, 1))
+                branch = sim._run_single_branch(focal_shift_pixels=shift,
+                    source_amplitude=1 / np.sqrt(ratios[0]), normalization_peak=norm)
+                intensity += (branch["final_psf_with_ghost"] if plane == "science"
+                              else np.abs(branch[field_key])**2)
+            for name, mask in masks.items():
+                curves[name][i] = np.mean(intensity[mask])
+            if preview is None:
+                preview = intensity.copy()
+            display_max = max(display_max, float(intensity.max()))
+        return {
+            "phases": phases, "mean_intensities": curves, "regions": regions,
+            "metrics": {name: {"maximum": float(v.max()), "minimum": float(v.min()),
+                                "peak_to_peak": float(v.max() - v.min())} for name, v in curves.items()},
+            "normalization_peak": norm,
+            "intensity_units": "unit-star direct PSF peak",
+            "measurement_plane": "final science focal plane" if plane == "science" else "SLM focal plane before Lyot stop",
+            "measurement_plane_key": plane,
+            "measure_all_companions": bool(measure_all_companions),
+            "background_subtraction": "none",
+            "phase_start_rad": start, "phase_span_rad": span,
+            "preview_phase_rad": float(phases[0]), "preview_intensity": preview,
+            "display_max": display_max, "slm_region_mask": region,
+            "source_state": {"include_star": bool(include_star), "include_planet": bool(include_planet),
+                "include_speckles": bool(include_speckles), "selected_speckle_indices": sorted(selected),
+                "target_speckle_index": None if measure_all_companions else target, "speckle_offsets_lamD": offsets,
+                "planet_offset_lamD": list(self.config.companion_offset_lamD),
+                "perfect_coronagraph": self.config.perfect_coronagraph,
+                "include_ghost": self.config.include_ghost,
+                "include_companion_ghost": self.config.include_companion_ghost,
+                "include_interference": self.config.include_interference,
+                "ghost_fraction": self.config.ghost_fraction, "ghost_coherence": self.config.ghost_coherence,
+                "star_planet_ratio": ratios[0],
+                "star_speckle_ratio": ratios[1], "lyot_reference_scale": float(scale)},
+        }
+
+    def calibrate_science_phase_zero_intensity(
+        self, *, selected_speckle_index: int = 0, radius_lamD: float = 0.5,
+        include_star: bool = True, include_planet: bool = True, include_speckles: bool = True,
+        selected_speckle_indices=None, star_planet_ratio: float = 500.0,
+        star_speckle_ratio: float = 100.0, lyot_reference_scale: float | None = None,
+    ) -> dict:
+        """Match total target-speckle/planet ROI means at zero applied SLM phase.
+
+        Solve the quadratic dependence on one common speckle amplitude. Full
+        physical images provide the calibration samples; no background is
+        removed from any measured or displayed intensity. The calibrated ratio
+        is held fixed in all subsequent phases and mask placements.
+        """
+        if not include_planet or not include_speckles:
+            raise ValueError("Science phase-zero matching requires the planet and speckles enabled.")
+        target = int(selected_speckle_index)
+        offsets = self._speckle_offsets()
+        selected = list(range(len(offsets))) if selected_speckle_indices is None else list(selected_speckle_indices)
+        if target < 0 or target >= len(offsets) or target not in selected:
+            raise ValueError("Enable the selected target speckle for science phase-zero matching.")
+        base_ratio = _positive_ratio(star_speckle_ratio, "star_speckle_ratio")
+        if not np.isfinite(base_ratio):
+            raise ValueError("star_speckle_ratio must be finite.")
+        zero = np.zeros((self.n_fft, self.n_fft), dtype=bool)
+        region_name = f"speckle_{target + 1}"
+        settings = dict(radius_lamD=radius_lamD, measure_all_companions=True,
+                        measurement_plane="science", phase_steps=2,
+                        include_star=include_star, include_planet=True,
+                        selected_speckle_indices=selected,
+                        star_planet_ratio=star_planet_ratio, lyot_reference_scale=lyot_reference_scale)
+        def sample(relative_amplitude):
+            result = self.science_intensity_sweep(zero, **settings,
+                include_speckles=relative_amplitude > 0,
+                star_speckle_ratio=base_ratio / relative_amplitude**2 if relative_amplitude else base_ratio)
+            means = result["mean_intensities"]
+            return (float(means[region_name][0]), float(means["planet"][0]), result["normalization_peak"])
+        samples = [sample(value) for value in (0.0, 1.0, 2.0)]
+        differences = [speckle - planet for speckle, planet, _ in samples]
+        d = differences[0]
+        c = (differences[2] - 2 * differences[1] + d) / 2
+        b = differences[1] - d - c
+        tol = 64 * np.finfo(float).eps * max(abs(c), abs(b), abs(d), np.finfo(float).tiny)
+        if abs(c) <= tol:
+            roots = [1.0] if abs(b) <= tol and abs(d) <= tol else ([-d / b] if abs(b) > tol else [])
+        else:
+            discriminant = b*b - 4*c*d
+            disc_tol = 64 * np.finfo(float).eps * max(b*b, abs(4*c*d), np.finfo(float).tiny)
+            if discriminant < -disc_tol:
+                roots = []
+            else:
+                q = -0.5 * (b + np.copysign(np.sqrt(max(0.0, discriminant)), b))
+                roots = [q/c, d/q] if q else [-b/(2*c)]
+        roots = [float(value) for value in roots if np.isfinite(value) and value > 0]
+        if not roots:
+            raise ValueError("Cannot match these science-region intensities with a positive common speckle amplitude. Change the target or source settings.")
+        factor = min(roots, key=lambda value: abs(np.log(value)))
+        ratio = base_ratio / factor**2
+        if not np.isfinite(ratio) or ratio <= 0:
+            raise ValueError("Science phase-zero matching produced an invalid Star/Speckle ratio.")
+        speckle_mean, planet_mean, norm = sample(factor)
+        residual = speckle_mean - planet_mean
+        if abs(residual) > 1e-8 * max(abs(speckle_mean), abs(planet_mean), 1e-30):
+            raise ValueError("Science phase-zero matching failed its physical-intensity verification.")
+        return {
+            "measurement_plane": "final science focal plane", "phase_rad": 0.0,
+            "quantity": "mean total physical intensity in fixed source regions",
+            "target_region": region_name, "reference_region": "planet",
+            "radius_lamD": float(radius_lamD), "star_speckle_ratio": float(ratio),
+            "input_star_speckle_ratio": float(base_ratio), "relative_speckle_amplitude": factor,
+            "speckle_phase_zero_mean_intensity": speckle_mean,
+            "planet_phase_zero_mean_intensity": planet_mean,
+            "residual": float(residual), "normalization_peak": float(norm),
+            "selected_speckle_indices": selected,
+        }
+
+    def science_comparison_sweeps(
+        self, template_mask: np.ndarray, *, comparison_type: str = "separate",
+        source_names: list[str] | None = None, progress_callback=None, **scan_settings,
+    ) -> dict:
+        """Compare fixed science apertures while scanning one SLM placement at a time.
+
+        Every scan includes the same enabled sources and records every aperture,
+        including cross-response in apertures away from the modulated source.
+        """
+        if comparison_type not in {"separate", "shared_mask"}:
+            raise ValueError("comparison_type must be 'separate' or 'shared_mask'.")
+        template = np.array(template_mask, dtype=bool, copy=True)
+        centers = {f"speckle_{i+1}": offset for i, offset in enumerate(self._speckle_offsets())}
+        centers["planet"] = self.config.companion_offset_lamD
+        names = list(centers) if source_names is None else list(source_names)
+        if not names or len(set(names)) != len(names) or any(name not in centers for name in names):
+            raise ValueError("Select existing, distinct companion names to scan.")
+        # Center the selected template itself, even when it was drawn off-axis.
+        yy, xx = np.nonzero(template)
+        anchor = ((int(round(float(xx.mean()))), int(round(float(yy.mean())))) if xx.size
+                  else (int(round((self.n_fft - 1) / 2)),) * 2)
+        # Validate every placement before starting any propagation.
+        placements = ({"shared_mask": {"mask": template}} if comparison_type == "shared_mask" else {
+            name: self.place_mask_template(template, centers[name], anchor_pixel=anchor) for name in names})
+        settings = dict(scan_settings)
+        settings.update(measurement_plane="science", measure_all_companions=True)
+        sweeps = {}
+        for index, (name, placement) in enumerate(placements.items()):
+            def report(update, name=name, index=index):
+                if progress_callback is not None:
+                    progress_callback({"active_run": f"science:{name}", "candidate": name,
+                                       "candidate_count": len(placements), "completed_runs": index, **update})
+            sweeps[name] = self.science_intensity_sweep(placement["mask"],
+                                                       progress_callback=report, **settings)
+        first = next(iter(sweeps.values()))
+        if any(item["normalization_peak"] != first["normalization_peak"]
+               or item["regions"] != first["regions"] for item in sweeps.values()):
+            raise RuntimeError("Science comparison must use common normalization and fixed apertures.")
+        own_metrics = {name: sweeps[name if comparison_type == "separate" else "shared_mask"]["metrics"][name]
+                       for name in names}
+        return {
+            "measurement_plane": "final science focal plane", "comparison_type": comparison_type,
+            "source_names": names, "mask_anchor_pixel": anchor, "sweeps": sweeps,
+            "placements": {name: {k: v for k, v in placement.items() if k != "mask"}
+                           for name, placement in placements.items()},
+            "own_region_metrics": own_metrics,
+            "modulation_matrix": {name: {region: metric["peak_to_peak"] for region, metric in run["metrics"].items()}
+                                  for name, run in sweeps.items()},
+            "normalization_peak": first["normalization_peak"], "regions": first["regions"],
+            "slm_template_mask": template,
+        }
+
     def phase_sweep(
         self,
         slm_region_mask: np.ndarray,
@@ -940,6 +1200,8 @@ class SLMLyotResponseCalculator:
         *,
         optimization_mode: str = "pixel_groups",
         comparison_type: str = "separate",
+        measurement_plane: str = "lyot", science_radius_lamD: float = 0.5,
+        selected_speckle_indices=None,
         circle_center_pixel: tuple[int, int] | None = None,
         circle_radius_min_px: int | None = None,
         circle_radius_max_px: int | None = None,
@@ -968,6 +1230,14 @@ class SLMLyotResponseCalculator:
         progress_callback: Callable[[dict], None] | None = None,
         stop_requested: Callable[[], bool] | None = None,
     ) -> dict:
+        plane = str(measurement_plane).lower()
+        if plane not in {"lyot", "science"}:
+            raise ValueError("Optimization measurement_plane must be 'lyot' or 'science'.")
+        if plane == "science":
+            selected_speckle_index = 0  # Score only s1 and the planet; other enabled light remains.
+            enabled = set(range(len(self._speckle_offsets()))) if selected_speckle_indices is None else set(selected_speckle_indices)
+            if not include_planet or not include_speckles or 0 not in enabled:
+                raise ValueError("Science optimization requires s1 and the planet enabled.")
         template = np.asarray(initial_template_mask, dtype=bool)
         if template.shape != (self.n_fft, self.n_fft):
             raise ValueError(f"SLM template must have shape ({self.n_fft}, {self.n_fft}).")
@@ -1102,22 +1372,47 @@ class SLMLyotResponseCalculator:
                         "candidate_name": name,
                     }
                 )
-            comparison = self.comparison_sweeps(
-                mask,
-                comparison_type=comparison_type,
-                selected_speckle_index=selected_speckle_index,
-                phase_steps=phase_steps,
-                phase_start_rad=phase_start_rad,
-                phase_span_rad=phase_span_rad,
-                subtraction_mode=subtraction_mode,
-                lyot_reference_scale=lyot_reference_scale,
-                include_star=include_star,
-                include_planet=include_planet,
-                include_speckles=include_speckles,
-                star_planet_ratio=star_planet_ratio,
-                star_speckle_ratio=star_speckle_ratio,
-                stop_requested=stop_requested,
-            )
+            if plane == "science":
+                def science_progress(update):
+                    if progress_callback is not None:
+                        progress_callback({**update, "active_run": "science_optimize",
+                            "placement": update.get("candidate"), "candidate": idx + 1,
+                            "candidate_count": len(candidates), "candidate_name": name})
+                comparison = self.science_comparison_sweeps(
+                    mask, comparison_type=comparison_type, source_names=["speckle_1", "planet"],
+                    measurement_region_names=["speckle_1", "planet"], radius_lamD=science_radius_lamD,
+                    phase_steps=phase_steps, phase_start_rad=phase_start_rad, phase_span_rad=phase_span_rad,
+                    include_star=include_star, include_planet=include_planet, include_speckles=include_speckles,
+                    selected_speckle_indices=selected_speckle_indices,
+                    star_planet_ratio=star_planet_ratio, star_speckle_ratio=star_speckle_ratio,
+                    lyot_reference_scale=lyot_reference_scale, progress_callback=science_progress)
+                own = comparison["own_region_metrics"]
+                planet_run = comparison["sweeps"]["planet" if comparison_type == "separate" else "shared_mask"]
+                ratio = self._safe_ratio(own["speckle_1"]["peak_to_peak"], own["planet"]["peak_to_peak"])
+                comparison["metrics"] = {
+                    "main_speckle_pp": own["speckle_1"]["peak_to_peak"],
+                    "main_planet_pp": own["planet"]["peak_to_peak"], "ratio_pp": ratio,
+                    "main_planet_mean": float(np.mean(planet_run["mean_intensities"]["planet"])),
+                    "complete": True,
+                    "ratio_denominator_near_zero": bool(own["planet"]["peak_to_peak"] <= 1e-12 * max(own["planet"]["maximum"], 1e-30)),
+                }
+            else:
+                comparison = self.comparison_sweeps(
+                    mask,
+                    comparison_type=comparison_type,
+                    selected_speckle_index=selected_speckle_index,
+                    phase_steps=phase_steps,
+                    phase_start_rad=phase_start_rad,
+                    phase_span_rad=phase_span_rad,
+                    subtraction_mode=subtraction_mode,
+                    lyot_reference_scale=lyot_reference_scale,
+                    include_star=include_star,
+                    include_planet=include_planet,
+                    include_speckles=include_speckles,
+                    star_planet_ratio=star_planet_ratio,
+                    star_speckle_ratio=star_speckle_ratio,
+                    stop_requested=stop_requested,
+                )
             metrics = comparison["metrics"]
             speckle_pp = float(metrics.get("main_speckle_pp", 0.0))
             planet_pp = float(metrics.get("main_planet_pp", np.inf))
@@ -1170,6 +1465,11 @@ class SLMLyotResponseCalculator:
             progress_callback({"active_run": "idle"})
 
         return {
+            "measurement_plane": plane,
+            "scored_regions": ["speckle_1", "planet"] if plane == "science" else None,
+            "science_radius_lamD": float(science_radius_lamD) if plane == "science" else None,
+            "star_planet_ratio": float(star_planet_ratio), "star_speckle_ratio": float(star_speckle_ratio),
+            "selected_speckle_indices": None if selected_speckle_indices is None else list(selected_speckle_indices),
             "primary_metric": "peak_to_peak",
             "optimization_mode": mode,
             "comparison_type": comparison_type,
@@ -1260,6 +1560,51 @@ class SLMLyotResponseCalculator:
         return metrics
 
 
+def _slm_science_npz_payload(result: dict) -> dict:
+    """Export measured samples and fixed geometry without object/pickle arrays."""
+    payload = {
+        "phases_rad": result["phases"],
+        "normalization_peak": result["normalization_peak"],
+        "preview_intensity": result["preview_intensity"],
+        "preview_phase_rad": result["preview_phase_rad"],
+        "slm_region_mask": result["slm_region_mask"],
+        "intensity_units": result["intensity_units"],
+        "source_state_json": json.dumps(result["source_state"]),
+    }
+    payload["measurement_plane"] = result["measurement_plane"]
+    payload["phase_zero_match_json"] = json.dumps(result.get("phase_zero_match"))
+    for name in result["regions"]:
+        payload[f"{name}_mean_intensity"] = result["mean_intensities"][name]
+        for key, value in result["regions"][name].items():
+            payload[f"{name}_{key}"] = value
+        for key, value in result["metrics"][name].items():
+            payload[f"{name}_{key}"] = value
+    return payload
+
+
+def save_slm_science_result(path: str | Path, result: dict) -> None:
+    np.savez_compressed(path, **_slm_science_npz_payload(result))
+
+
+def save_slm_science_comparison(path: str | Path, comparison: dict) -> None:
+    payload = {"slm_template_mask": comparison["slm_template_mask"],
+               "comparison_type": comparison["comparison_type"],
+               "normalization_peak": comparison["normalization_peak"],
+               "source_names": np.asarray(comparison["source_names"])}
+    for placement, run in comparison["sweeps"].items():
+        payload.update({f"{placement}__{key}": value for key, value in _slm_science_npz_payload(run).items()})
+    def json_value(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, tuple):
+            return list(value)
+        raise TypeError(type(value).__name__)
+    payload["comparison_metadata_json"] = json.dumps({
+        key: value for key, value in comparison.items() if key not in {"sweeps", "slm_template_mask"}
+    }, default=json_value)
+    np.savez_compressed(path, **payload)
+
+
 def save_slm_lyot_result(path: str | Path, result: dict) -> None:
     path = Path(path)
     fields = result["fields"]
@@ -1313,6 +1658,9 @@ def launch_gui() -> None:
     undo_stack: list[np.ndarray] = []
     last_result: dict | None = None
     last_sweep: dict | None = None
+    last_science: dict | None = None
+    science_active = False
+    science_window: dict = {}
     display_mode = {"value": "abs"}
     drawing_tool = {"value": "circle"}
     paint_mode = {"value": "paint"}
@@ -1404,6 +1752,10 @@ def launch_gui() -> None:
         ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
         ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
+    ax_measurement_plane = fig.add_axes([0.78, 0.895, 0.20, 0.075])
+    ax_measurement_plane.set_title("Intensity measurement plane", fontsize=9)
+    measurement_plane_radio = RadioButtons(ax_measurement_plane, ["Lyot plane", "Final science"], active=1)
+
     ax_checks = fig.add_axes([0.78, 0.76, 0.12, 0.12])
     source_checks = CheckButtons(ax_checks, ["Star", "Planet", "Speckles"], [True, True, True])
     ax_ratio_planet = fig.add_axes([0.78, 0.69, 0.12, 0.04])
@@ -1417,11 +1769,11 @@ def launch_gui() -> None:
     ax_ratio_speckle.text(
         0.0,
         0.5,
-        "Speckle intensity = planet",
+        "Star/Speckle: set in Intensity window",
         va="center",
         fontsize=8,
     )
-    ax_phase_steps = fig.add_axes([0.78, 0.555, 0.08, 0.04])
+    ax_phase_steps = fig.add_axes([0.91, 0.62, 0.08, 0.04])
     phase_steps_box = TextBox(ax_phase_steps, "Steps", initial="6")
     ax_subtraction_mode = fig.add_axes([0.91, 0.555, 0.08, 0.055])
     subtraction_mode_radio = RadioButtons(ax_subtraction_mode, ["field", "intensity"])
@@ -1464,6 +1816,7 @@ def launch_gui() -> None:
         ("Eval Mod", [0.78, 0.04, 0.10, 0.04]),
         ("Save Log", [0.90, 0.04, 0.09, 0.04]),
         ("Save Fig", [0.90, 0.09, 0.09, 0.04]),
+        ("Intensity", [0.78, 0.09, 0.10, 0.04]),
     ]
     buttons = {label: Button(fig.add_axes(pos), label) for label, pos in button_specs}
 
@@ -1699,8 +2052,108 @@ def launch_gui() -> None:
                 image.set_clim(float(np.min(finite)), float(np.max(finite)))
         update_results_text(last_result)
 
+    def scan_science_intensity(_event=None) -> None:
+        nonlocal last_science, science_active
+        from matplotlib.colors import LogNorm
+
+        if measurement_plane_radio.value_selected == "Lyot plane":
+            evaluate_modulation()
+            return
+        status = science_window["status"]
+        try:
+            states = source_checks.get_status()
+            status.set_text("Scanning physical intensity...")
+            science_window["figure"].canvas.draw_idle()
+            measured = calculator.science_intensity_sweep(
+                region,
+                radius_lamD=float(science_window["radius"].text),
+                measurement_plane="science",
+                measure_all_companions=True,
+                phase_steps=int(phase_steps_box.text),
+                include_star=states[0], include_planet=states[1], include_speckles=states[2],
+                star_planet_ratio=float(planet_ratio_box.text),
+                star_speckle_ratio=float(science_window["speckle_ratio"].text),
+                lyot_reference_scale=float(reference_scale_box.text) / 100.0,
+            )
+        except Exception as exc:
+            status.set_text(f"Intensity scan failed: {exc}")
+            science_window["figure"].canvas.draw_idle()
+            return
+        last_science = measured
+        science_active = True
+        science_window["figure"].set_size_inches(14, max(8, 4 + 0.45 * len(measured["regions"])))
+        ax = science_window["image_axes"]
+        ax.clear()
+        vmax = max(measured["display_max"], 1e-29)
+        image = ax.imshow(measured["preview_intensity"], origin="lower", extent=extent,
+                          cmap="inferno", norm=LogNorm(vmin=vmax * 1e-8, vmax=vmax))
+        science_window["colorbar_axes"].clear()
+        science_window["figure"].colorbar(image, cax=science_window["colorbar_axes"],
+                                        label="Intensity / unit-star direct PSF peak")
+        colors = {name: ("#007f91" if name == "planet" else plt.get_cmap("tab10")(i % 10))
+                  for i, name in enumerate(measured["regions"])}
+        for name, aperture in measured["regions"].items():
+            x, y = aperture["center_lamD"]
+            radius = aperture["radius_lamD"]
+            color = "#00e5ff" if name == "planet" else "#ffe000"
+            ax.add_patch(Circle((x, y), radius, fill=False, edgecolor=color, linewidth=1.8))
+            ax.annotate(name, (x, y + radius), xytext=(0, 5), textcoords="offset points",
+                        ha="center", color=color, fontsize=10)
+        half = max(abs(v) for r in measured["regions"].values() for v in r["center_lamD"]) + radius + 2
+        ax.set_xlim(max(extent[0], -half), min(extent[1], half))
+        ax.set_ylim(max(extent[2], -half), min(extent[3], half))
+        ax.set(title=f"{measurement_plane_radio.value_selected}: phase {measured['preview_phase_rad']:.3f} rad",
+               xlabel="x [lambda/D]", ylabel="y [lambda/D]")
+        plot = science_window["curve_axes"]
+        plot.clear()
+        rows = []
+        for name, color in colors.items():
+            plot.plot(measured["phases"], measured["mean_intensities"][name], "o-",
+                      label=name, color=color, markersize=4)
+            item = measured["metrics"][name]
+            rows.append(f"{name:12s} {item['maximum']:.5e}  {item['minimum']:.5e}  {item['peak_to_peak']:.5e}")
+        plot.set(title="Mean pixel intensity in fixed circles", xlabel="SLM phase [rad]",
+                 ylabel="Intensity / unit-star direct PSF peak", xlim=(0, 2 * np.pi))
+        plot.ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useOffset=False)
+        plot.legend()
+        plot.grid(alpha=0.25)
+        metrics = science_window["metrics_axes"]
+        metrics.clear()
+        metrics.axis("off")
+        rows.insert(0, "Region          Maximum      Minimum      Peak-to-peak")
+        metrics.text(0, 1, "\n".join(rows), va="top", family="monospace",
+                     fontsize=max(5, min(9, 90 / len(rows))))
+        status.set_text(
+            f"{measurement_plane_radio.value_selected}; {len(measured['phases'])} phases; radius {radius:g} lambda/D. All companions; no background subtraction.\n"
+            "Image shows first phase. Main Save Result / Save Log / Save Fig export this measurement.")
+        science_window["figure"].canvas.draw_idle()
+
+    def open_science_intensity(_event=None) -> None:
+        nonlocal science_active
+        if science_window and plt.fignum_exists(science_window["figure"].number):
+            scan_science_intensity()
+            science_window["figure"].show()
+            return
+        science_fig = plt.figure(figsize=(14, 8))
+        science_fig.suptitle("Final science intensity measurement — all companions")
+        science_window.clear()
+        science_window.update({
+            "figure": science_fig,
+            "image_axes": science_fig.add_axes([0.06, 0.30, 0.34, 0.56]),
+            "colorbar_axes": science_fig.add_axes([0.42, 0.30, 0.014, 0.56]),
+            "curve_axes": science_fig.add_axes([0.59, 0.52, 0.38, 0.32]),
+            "metrics_axes": science_fig.add_axes([0.53, 0.20, 0.45, 0.22]),
+            "status": science_fig.text(0.07, 0.14, "", fontsize=9),
+            "radius": TextBox(science_fig.add_axes([0.25, 0.055, 0.09, 0.045]), "ROI r [lambda/D] ", initial="0.5"),
+            "speckle_ratio": TextBox(science_fig.add_axes([0.65, 0.055, 0.09, 0.045]), "Star/Speckle ", initial="100"),
+            "scan": Button(science_fig.add_axes([0.82, 0.055, 0.12, 0.045]), "Scan Intensity"),
+        })
+        science_window["scan"].on_clicked(scan_science_intensity)
+        scan_science_intensity()
+        science_fig.show()
+
     def apply(_event=None) -> None:
-        nonlocal last_result
+        nonlocal last_result, science_active
         try:
             states = source_checks.get_status()
             last_result = calculator.propagate(
@@ -1715,26 +2168,27 @@ def launch_gui() -> None:
         except Exception as exc:
             update_results_text(None, f"Propagation failed:\n{exc}")
             return
+        science_active = False
         clear_phase_sweep_plot()
         refresh_maps()
 
     def evaluate_modulation(_event=None) -> None:
-        nonlocal last_sweep
+        nonlocal last_sweep, science_active
+        if measurement_plane_radio.value_selected == "Final science":
+            open_science_intensity()
+            return
         try:
             states = source_checks.get_status()
             last_sweep = calculator.phase_sweep(
-                region,
-                phase_steps=int(float(phase_steps_box.text)),
+                region, phase_steps=int(phase_steps_box.text),
                 subtraction_mode=subtraction_mode_radio.value_selected,
                 lyot_reference_scale=float(reference_scale_box.text) / 100.0,
-                include_star=states[0],
-                include_planet=states[1],
-                include_speckles=states[2],
-                star_planet_ratio=float(planet_ratio_box.text),
-            )
+                include_star=states[0], include_planet=states[1], include_speckles=states[2],
+                star_planet_ratio=float(planet_ratio_box.text))
         except Exception as exc:
-            update_results_text(None, f"Phase sweep failed:\n{exc}")
+            update_results_text(None, f"Lyot phase sweep failed:\n{exc}")
             return
+        science_active = False
         update_phase_sweep_result(last_sweep)
 
     def save_current_mask(_event=None) -> None:
@@ -1752,6 +2206,13 @@ def launch_gui() -> None:
         redraw_mask()
 
     def save_current_result(_event=None) -> None:
+        if science_active and last_science is not None:
+            path = _slm_artifact_path(
+                planet_offset_lamD=calculator.config.companion_offset_lamD,
+                process_kind=f"{last_science['measurement_plane_key']}_intensity", suffix="result.npz")
+            save_slm_science_result(path, last_science)
+            update_results_text(last_result, f"Saved intensity result to {path}")
+            return
         if last_result is None:
             update_results_text(None, "No propagation result to save.")
             return
@@ -1773,7 +2234,7 @@ def launch_gui() -> None:
 
     def save_current_log(_event=None) -> None:
         states = source_checks.get_status()
-        process_kind = "phase_sweep" if last_sweep is not None else "single"
+        process_kind = f"{last_science['measurement_plane_key']}_intensity" if science_active else ("phase_sweep" if last_sweep is not None else "single")
         payload = {
             "gui": "interactive_slm_gui",
             "saved_at": datetime.now().isoformat(),
@@ -1790,9 +2251,13 @@ def launch_gui() -> None:
                 "reference_subtraction_percent": float(reference_scale_box.text),
                 "phase_steps": int(float(phase_steps_box.text)),
                 "subtraction_mode": str(subtraction_mode_radio.value_selected),
+                "measurement_plane": measurement_plane_radio.value_selected,
             },
             "single_phase_metrics": None if last_result is None else last_result["metrics"],
             "phase_sweep": last_sweep,
+            "science_intensity": None if last_science is None else {
+                k: v for k, v in last_science.items() if k not in {"preview_intensity", "slm_region_mask"}
+            },
         }
         path = _slm_artifact_path(
             planet_offset_lamD=calculator.config.companion_offset_lamD,
@@ -1803,13 +2268,14 @@ def launch_gui() -> None:
         update_results_text(last_result, f"Saved log to {path}")
 
     def save_current_figure(_event=None) -> None:
-        process_kind = "phase_sweep" if last_sweep is not None else "single"
+        process_kind = f"{last_science['measurement_plane_key']}_intensity" if science_active else ("phase_sweep" if last_sweep is not None else "single")
         path = _slm_artifact_path(
             planet_offset_lamD=calculator.config.companion_offset_lamD,
             process_kind=process_kind,
             suffix="figure.png",
         )
-        fig.savefig(path, dpi=180)
+        target_fig = science_window["figure"] if science_active else fig
+        target_fig.savefig(path, dpi=180)
         update_results_text(last_result, f"Saved figure to {path}")
 
     def clear(_event=None) -> None:
@@ -1947,6 +2413,7 @@ def launch_gui() -> None:
         display_mode["value"] = label
         refresh_maps()
 
+    buttons["Intensity"].on_clicked(evaluate_modulation)
     buttons["Apply"].on_clicked(apply)
     buttons["Eval Mod"].on_clicked(evaluate_modulation)
     buttons["Clear"].on_clicked(clear)

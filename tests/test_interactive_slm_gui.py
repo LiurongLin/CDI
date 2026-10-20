@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -16,12 +17,104 @@ from coronagraph.interactive_slm_gui import (
     SLMLyotResponseCalculator,
     default_slm_gui_config,
     save_slm_lyot_result,
+    launch_gui,
 )
 from coronagraph.html_slm_gui import HTML, _SLMHtmlServer
 from coronagraph.masks import NoPhaseMask
 
 
 class InteractiveSLMGuiTests(unittest.TestCase):
+    def test_desktop_science_window_scan_and_exports(self) -> None:
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.widgets import Button, TextBox, RadioButtons
+
+        calc = SLMLyotResponseCalculator(SLMLyotConfig(
+            pupil_pixels=12, focal_sampling=3.0, phase_mask=NoPhaseMask(),
+            companion_offset_lamD=(2.0, 1.0),
+            custom_speckle_offsets_lamD=((-2.0, 0.0), (0.0, -2.0)),
+            include_ghost=False, ghost_fraction=0.0))
+        buttons, boxes, radios = {}, {}, {}
+        def button(*args, **kwargs):
+            widget = Button(*args, **kwargs)
+            buttons[widget.label.get_text()] = widget
+            return widget
+        def textbox(*args, **kwargs):
+            widget = TextBox(*args, **kwargs)
+            boxes[widget.label.get_text().strip()] = widget
+            return widget
+        def radio(*args, **kwargs):
+            widget = RadioButtons(*args, **kwargs)
+            radios[tuple(label.get_text() for label in widget.labels)] = widget
+            return widget
+        def click(name):
+            buttons[name]._observers.process("clicked", None)
+
+        previous_directory = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch(
+                "coronagraph.interactive_slm_gui.SLMLyotResponseCalculator", return_value=calc
+            ), patch("matplotlib.widgets.Button", side_effect=button), patch(
+                "matplotlib.widgets.TextBox", side_effect=textbox
+            ), patch("matplotlib.widgets.RadioButtons", side_effect=radio), patch.object(plt, "show"), patch.object(Figure, "show"):
+                os.chdir(directory)
+                launch_gui()
+                main = plt.gcf()
+                boxes["Cx px"].set_val("12")
+                boxes["Cy px"].set_val("18")
+                boxes["R px"].set_val("2")
+                boxes["Steps"].set_val("5")
+                boxes["Star/Planet"].set_val("700")
+                original_mask = main.axes[0].images[0].get_array().copy()
+                click("Intensity")
+                science = plt.gcf()
+                self.assertIsNot(main, science)
+                boxes["ROI r [lambda/D]"].set_val("0.7")
+                boxes["Star/Speckle"].set_val("80")
+                click("Scan Intensity")
+                image_axes, curve_axes = science.axes[0], science.axes[2]
+                self.assertEqual(len(image_axes.patches), 3)
+                self.assertEqual(image_axes.patches[0].center, (-2.0, 0.0))
+                self.assertEqual(image_axes.patches[1].center, (0.0, -2.0))
+                self.assertTrue(all(circle.radius == 0.7 for circle in image_axes.patches))
+                self.assertEqual([line.get_label() for line in curve_axes.lines], ["speckle_1", "speckle_2", "planet"])
+                self.assertTrue(all(len(line.get_ydata()) == 5 for line in curve_axes.lines))
+                self.assertGreater(np.max(image_axes.images[0].get_array()), 0)
+                np.testing.assert_array_equal(main.axes[0].images[0].get_array(), original_mask)
+                for name in ("Save Result", "Save Log", "Save Fig"):
+                    click(name)
+                artifacts = list(Path("interactive_slm_logs").glob("*/*science_intensity*"))
+                self.assertEqual(len(artifacts), 3)
+                saved_log = json.loads(next(p for p in artifacts if p.suffix == ".json").read_text())
+                measurement = saved_log["science_intensity"]
+                self.assertEqual(measurement["source_state"]["star_planet_ratio"], 700)
+                self.assertEqual(measurement["source_state"]["star_speckle_ratio"], 80)
+                self.assertNotIn("preview_intensity", measurement)
+                with np.load(next(p for p in artifacts if p.suffix == ".npz")) as saved:
+                    self.assertEqual(saved["speckle_2_radius_lamD"], 0.7)
+                    np.testing.assert_array_equal(saved["speckle_2_center_lamD"], [0, -2])
+                    np.testing.assert_allclose(saved["planet_mean_intensity"], curve_axes.lines[2].get_ydata())
+                    np.testing.assert_array_equal(saved["slm_region_mask"], original_mask.astype(bool))
+                radios[("Lyot plane", "Final science")].set_active(0)
+                click("Eval Mod")
+                lyot_axes = next(ax for ax in main.axes if ax.get_title() == "Integrated Lyot-stop power vs phase")
+                self.assertEqual(len(lyot_axes.lines), 5)
+                click("Save Log")
+                lyot_log = next(Path("interactive_slm_logs").glob("*/*phase_sweep_log.json"))
+                lyot_payload = json.loads(lyot_log.read_text())
+                self.assertEqual(lyot_payload['controls']['measurement_plane'], "Lyot plane")
+                self.assertEqual(len(lyot_payload['phase_sweep']['phases']), 5)
+                radios[("Lyot plane", "Final science")].set_active(1)
+                # Invalid controls leave the previous valid measurement intact.
+                boxes["ROI r [lambda/D]"].set_val("-1")
+                click("Scan Intensity")
+                self.assertIn("Intensity scan failed", science.texts[1].get_text())
+                self.assertEqual(len(image_axes.patches), 3)
+                self.assertGreater(next(p for p in artifacts if p.suffix == ".png").stat().st_size, 1000)
+        finally:
+            os.chdir(previous_directory)
+            plt.close("all")
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed for GUI behavior checks")
     def test_html_result_dialog_and_selective_image_saving(self) -> None:
         script = HTML.split("<script>", 1)[1].split("</script>", 1)[0]
